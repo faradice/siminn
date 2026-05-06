@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useFetch } from './shared';
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from 'recharts';
-import { Database, Rows3, Clock, Activity, ChevronDown, ChevronRight, ArrowLeft } from 'lucide-react';
+import { ChevronDown, ChevronRight, ArrowLeft } from 'lucide-react';
 
 const COLORS = ['#60a5fa', '#34d399', '#a78bfa', '#fbbf24', '#f87171', '#2dd4bf', '#f472b6', '#fb923c'];
 const TOOLTIP_STYLE = { contentStyle: { background: '#1f2937', border: '1px solid #374151', borderRadius: 8 }, itemStyle: { color: '#d1d5db' }, labelStyle: { color: '#9ca3af' } };
@@ -17,15 +17,214 @@ function timeAgo(date) {
   return `${Math.floor(s / 86400)} dögum síðan`;
 }
 
-function KpiCard({ icon: Icon, label, value, color }) {
+function HeroBanner({ history, tables, source }) {
+  const [animated, setAnimated] = useState(false);
+  const countRef = useRef(null);
+  const rateRef = useRef(null);
+
+  const totalRows = tables.reduce((s, t) => s + t.rows, 0);
+  const lastRunRows = history.length > 0 ? (history[history.length - 1].rows || 0) : 0;
+  const prevRunRows = history.length > 1 ? (history[history.length - 2].rows || 0) : 0;
+  const rowDelta = lastRunRows - prevRunRows;
+  const lastSuccess = [...history].reverse().find(h => h.status === 'success');
+
+  // Freshness score: 100 when just ran, 0 when 2x overdue vs avg interval
+  const successes = history.filter(h => h.status === 'success');
+  let expectedMs = 24 * 60 * 60 * 1000;
+  if (successes.length >= 2) {
+    const times = successes.map(h => new Date(h.started_at).getTime()).sort((a, b) => a - b);
+    const gaps = times.slice(1).map((t, i) => t - times[i]);
+    expectedMs = gaps.reduce((s, g) => s + g, 0) / gaps.length;
+  }
+  const elapsed = successes.length > 0
+    ? Date.now() - Math.max(...successes.map(h => new Date(h.started_at).getTime()))
+    : expectedMs * 2;
+  const freshness = Math.max(0, Math.min(100, 100 * (1 - elapsed / (expectedMs * 2))));
+
+  const cx = 140, cy = 130, r = 100;
+  const normalizedScore = freshness / 100;
+  const totalArcLen = Math.PI * r;
+  const arcPath = (startDeg, endDeg, radius) => {
+    const s = (startDeg * Math.PI) / 180, e = (endDeg * Math.PI) / 180;
+    const x1 = cx + radius * Math.cos(Math.PI + s), y1 = cy - radius * Math.sin(Math.PI + s);
+    const x2 = cx + radius * Math.cos(Math.PI + e), y2 = cy - radius * Math.sin(Math.PI + e);
+    return `M ${x1} ${y1} A ${radius} ${radius} 0 ${endDeg - startDeg > 180 ? 1 : 0} 1 ${x2} ${y2}`;
+  };
+
+  const scoreColor = freshness >= 90 ? '#22c55e' : freshness >= 70 ? '#84cc16' : freshness >= 50 ? '#eab308' : '#ef4444';
+  const scoreVerdict = freshness >= 95 ? 'Framúrskarandi' : freshness >= 85 ? 'Frábært' : freshness >= 70 ? 'Gott' : freshness >= 50 ? 'Viðunandi' : 'Þarfnast úrbóta';
+
+  const sorted = [...tables].sort((a, b) => b.rows - a.rows);
+  const top5 = sorted.slice(0, 5);
+  const otherRows = sorted.slice(5).reduce((s, t) => s + t.rows, 0);
+  const segments = top5.filter(t => t.rows > 0).map(t => ({ name: t.table, rows: t.rows }));
+  if (otherRows > 0 && totalRows > 0 && Math.round((otherRows / totalRows) * 100) >= 1) segments.push({ name: 'annað', rows: otherRows });
+  const topTables = sorted.slice(0, 3);
+  const maxTableRows = topTables.length > 0 ? topTables[0].rows : 1;
+
+  useEffect(() => {
+    const t = setTimeout(() => setAnimated(true), 50);
+    return () => clearTimeout(t);
+  }, []);
+
+  useEffect(() => {
+    if (!animated) return;
+    const duration = 1500;
+    const easeOut = t => 1 - Math.pow(1 - t, 3);
+    const animateValue = (el, target, format) => {
+      if (!el) return;
+      const start = performance.now();
+      const step = (now) => {
+        const t = Math.min((now - start) / duration, 1);
+        el.textContent = format(Math.round(easeOut(t) * target));
+        if (t < 1) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    };
+    animateValue(countRef.current, totalRows, v => v.toLocaleString('is-IS'));
+    animateValue(rateRef.current, Math.round(freshness), v => `${v}%`);
+  }, [animated, totalRows, freshness]);
+
   return (
-    <div className="bg-gray-800/60 rounded-xl p-5 border border-gray-700/50">
-      <div className="flex items-center gap-3 mb-2">
-        <Icon className={`w-5 h-5 ${color}`} />
-        <span className="text-sm text-gray-400">{label}</span>
+    <>
+      <style>{`@keyframes hero-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }`}</style>
+      <div className="relative rounded-2xl p-[2px] overflow-hidden">
+        <div className="absolute inset-0 rounded-2xl" style={{
+          background: `linear-gradient(135deg, ${scoreColor}, #3b82f6, #8b5cf6, ${scoreColor})`,
+          opacity: animated ? 0.7 : 0, transition: 'opacity 1.5s ease',
+        }} />
+        <div className="relative rounded-2xl bg-gradient-to-br from-gray-900 via-[#0c1322] to-gray-900 p-6 lg:p-10 overflow-hidden">
+          <div className="absolute top-[-80px] left-[-60px] w-[400px] h-[400px] rounded-full opacity-[0.18] blur-[120px]" style={{ background: scoreColor }} />
+          <div className="absolute bottom-[-100px] right-[-80px] w-[350px] h-[350px] rounded-full opacity-[0.08] blur-[120px] bg-blue-500" />
+
+          <div className="relative z-10 flex flex-col lg:flex-row items-center justify-center gap-8">
+            {/* Left: Raðir */}
+            <div className="flex-shrink-0 min-w-[160px]">
+              <div className="rounded-xl bg-white/[0.04] backdrop-blur-sm border border-white/[0.08] p-5 space-y-4">
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500 font-medium flex items-center gap-2">
+                    Raðir
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-500 inline-block" style={{ animation: 'hero-dot 2s ease-in-out infinite' }} />
+                  </div>
+                  <div className="text-4xl font-extrabold text-white mt-1 tabular-nums" ref={countRef}>
+                    {totalRows.toLocaleString('is-IS')}
+                  </div>
+                  <div className="text-[11px] text-gray-500">heildarraðir</div>
+                </div>
+                {history.length > 1 && (
+                  <div className="border-t border-white/[0.06] pt-3">
+                    <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500 font-medium">Síðasta keyrsla</div>
+                    <div className={`text-2xl font-bold mt-1 ${rowDelta >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {rowDelta > 0 ? '+' : ''}{rowDelta.toLocaleString('is-IS')}
+                      <span className="text-sm ml-1">{rowDelta >= 0 ? '▲' : '▼'}</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Center: Gauge */}
+            <div className="flex flex-col items-center">
+              <svg viewBox="0 0 280 170" className="w-[300px] lg:w-[360px]">
+                <defs>
+                  <filter id="heroGlow2"><feGaussianBlur stdDeviation="8" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
+                  <linearGradient id="heroArc2" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stopColor="#ef4444" /><stop offset="25%" stopColor="#f59e0b" />
+                    <stop offset="50%" stopColor="#eab308" /><stop offset="75%" stopColor="#84cc16" />
+                    <stop offset="100%" stopColor="#22c55e" />
+                  </linearGradient>
+                  <filter id="heroArcGlow2"><feGaussianBlur stdDeviation="5" /></filter>
+                </defs>
+                <path d={arcPath(0, 180, r)} fill="none" stroke="#1f2937" strokeWidth="22" strokeLinecap="round" />
+                <path d={arcPath(0, 180, r)} fill="none" stroke="url(#heroArc2)" strokeWidth="22" strokeLinecap="round"
+                  filter="url(#heroArcGlow2)" opacity="0.4"
+                  style={{ strokeDasharray: totalArcLen, strokeDashoffset: animated ? totalArcLen * (1 - normalizedScore) : totalArcLen,
+                    transition: 'stroke-dashoffset 2s cubic-bezier(0.16, 1, 0.3, 1)' }} />
+                <path d={arcPath(0, 180, r)} fill="none" stroke="url(#heroArc2)" strokeWidth="22" strokeLinecap="round"
+                  style={{ strokeDasharray: totalArcLen, strokeDashoffset: animated ? totalArcLen * (1 - normalizedScore) : totalArcLen,
+                    transition: 'stroke-dashoffset 2s cubic-bezier(0.16, 1, 0.3, 1)' }} />
+                <g style={{ transform: `rotate(${animated ? normalizedScore * 180 : 0}deg)`,
+                  transformOrigin: `${cx}px ${cy}px`, transition: 'transform 2.5s cubic-bezier(0.16, 1, 0.3, 1)' }}>
+                  <polygon points={`${cx},${cy - 3.5} ${cx - 78},${cy} ${cx},${cy + 3.5}`} fill="white" opacity="0.9" />
+                </g>
+                <circle cx={cx} cy={cy} r="7" fill="#111827" stroke="white" strokeWidth="2.5" />
+                <text ref={rateRef} x={cx} y={cy - 28} textAnchor="middle" fill={scoreColor} fontSize="44" fontWeight="800"
+                  filter="url(#heroGlow2)">{Math.round(freshness)}%</text>
+                <text x={cx} y={cy - 8} textAnchor="middle" fill="#6b7280" fontSize="11" fontWeight="500">ferskleiki</text>
+                <text x="28" y="148" fill="#4b5563" fontSize="9">0%</text>
+                <text x={cx} y="10" textAnchor="middle" fill="#4b5563" fontSize="9">50%</text>
+                <text x="250" y="148" fill="#4b5563" fontSize="9">100%</text>
+              </svg>
+              <div className="-mt-1" style={{ opacity: animated ? 1 : 0, transform: animated ? 'translateY(0)' : 'translateY(8px)',
+                transition: 'all 0.6s ease 1.8s' }}>
+                <span className="text-sm font-semibold px-4 py-1.5 rounded-full"
+                  style={{ color: scoreColor, backgroundColor: `${scoreColor}15`, border: `1px solid ${scoreColor}30` }}>
+                  {scoreVerdict}
+                </span>
+              </div>
+            </div>
+
+            {/* Right: Töflur */}
+            <div className="flex-shrink-0 min-w-[160px]">
+              <div className="rounded-xl bg-white/[0.04] backdrop-blur-sm border border-white/[0.08] p-5 space-y-4">
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500 font-medium">Töflur</div>
+                  <div className="text-4xl font-extrabold text-white mt-1 tabular-nums">{tables.length}</div>
+                  <div className="text-[11px] text-gray-500">í uppsprettu</div>
+                </div>
+                <div className="border-t border-white/[0.06] pt-3">
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500 font-medium">Nýjustu gögn</div>
+                  <div className="text-lg font-bold text-blue-400 mt-1">{timeAgo(lastSuccess?.started_at)}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Segment bar */}
+          {segments.length > 0 && (
+            <div className="relative z-10 mt-8">
+              <div className="flex h-3.5 rounded-full overflow-hidden bg-gray-800/80">
+                {segments.map((seg, i) => (
+                  <div key={i} className="transition-all duration-[1800ms] ease-out"
+                    style={{ width: animated ? `${totalRows ? (seg.rows / totalRows) * 100 : 0}%` : '0%',
+                      backgroundColor: COLORS[i % COLORS.length] }} />
+                ))}
+              </div>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2.5 text-xs text-gray-400">
+                {segments.map((seg, i) => (
+                  <span key={i} className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ backgroundColor: COLORS[i % COLORS.length] }} />
+                    {seg.name} {totalRows ? Math.round((seg.rows / totalRows) * 100) : 0}%
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Top 3 mini cards */}
+          {topTables.length > 0 && (
+            <div className="relative z-10 mt-5 grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {topTables.map((t, i) => {
+                const pct = (t.rows / maxTableRows) * 100;
+                const barColor = pct >= 80 ? 'bg-green-500' : pct >= 50 ? 'bg-green-400' : pct >= 25 ? 'bg-yellow-400' : 'bg-gray-400';
+                return (
+                  <div key={i} className="bg-white/[0.03] backdrop-blur-sm rounded-lg px-3 py-2.5 border border-white/[0.05]">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[11px] text-gray-400 truncate max-w-[75%]" title={t.table}>{t.table}</span>
+                      <span className="text-[11px] font-bold text-white">{t.rows.toLocaleString('is-IS')}</span>
+                    </div>
+                    <div className="h-1.5 bg-gray-700/50 rounded-full overflow-hidden">
+                      <div className={`h-full ${barColor} rounded-full transition-all duration-[1800ms] ease-out`}
+                        style={{ width: animated ? `${pct}%` : '0%' }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
-      <div className="text-3xl font-bold text-white">{value}</div>
-    </div>
+    </>
   );
 }
 
@@ -163,40 +362,18 @@ export default function SourceDashboardPage({ sourceName, onBack }) {
   if (!data) return <div className="text-red-400 text-sm p-6">Gat ekki hlaðið mælaborði</div>;
 
   const { source, history, tables, tableDetails } = data;
-  const totalRows = tables.reduce((s, t) => s + t.rows, 0);
-  const lastRunRows = history.length > 0 ? history[history.length - 1].rows || 0 : 0;
-
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-3">
         <button onClick={onBack} className="p-2 rounded-lg hover:bg-gray-800 transition-colors text-gray-400 hover:text-white">
           <ArrowLeft className="w-5 h-5" />
         </button>
-        <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-white">{sourceName}</h1>
-            <span className="text-xs px-2 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/20">{source.type}</span>
-            {source.schedule && (
-              <span className="text-xs px-2 py-0.5 rounded bg-gray-700 text-gray-300">{source.schedule}</span>
-            )}
-            {source.lastStatus && (
-              <span className={`text-xs px-2 py-0.5 rounded ${source.lastStatus === 'success' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
-                {source.lastStatus}
-              </span>
-            )}
-          </div>
-          <div className="text-sm text-gray-500 mt-0.5">Síðasta keyrsla: {timeAgo(source.lastRun)}</div>
-        </div>
+        <h1 className="text-2xl font-bold text-white">{sourceName}</h1>
+        <span className="text-xs px-2 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/20">{source.type}</span>
       </div>
 
-      {/* KPI cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <KpiCard icon={Database} label="Töflur" value={tables.length} color="text-blue-400" />
-        <KpiCard icon={Rows3} label="Heildarraðir" value={totalRows.toLocaleString('is-IS')} color="text-emerald-400" />
-        <KpiCard icon={Clock} label="Síðasta keyrsla" value={timeAgo(source.lastRun)} color="text-purple-400" />
-        <KpiCard icon={Activity} label="Raðir í síðustu" value={lastRunRows.toLocaleString('is-IS')} color="text-amber-400" />
-      </div>
+      <HeroBanner history={history} tables={tables} source={source} />
 
       {/* Run history chart */}
       {history.length > 1 && (
