@@ -10,7 +10,7 @@ const SCHEDULE_PRESETS = [
   { label: 'Slökkt', value: '' },
 ];
 
-export default function SourcesPage() {
+export default function SourcesPage({ onNavigate }) {
   const { data: sources, loading, refetch } = useFetch('/sources');
   const [running, setRunning] = useState(null);
   const [result, setResult] = useState(null);
@@ -107,7 +107,7 @@ export default function SourcesPage() {
               <div key={s.name} className="flex items-center gap-4 p-4 bg-gray-900/50 rounded-lg border border-gray-700/30">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-white">{s.name}</span>
+                    <button onClick={() => onNavigate('source-dashboard', s.name)} className="text-sm font-medium text-white hover:text-blue-400 transition-colors">{s.name}</button>
                     {s.schedule && (
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/20 flex items-center gap-1">
                         <Calendar className="w-2.5 h-2.5" />{s.schedule}

@@ -395,6 +395,148 @@ app.get('/api/overview', async (req, res) => {
   }
 });
 
+// ── API: Source dashboard ──
+app.get('/api/sources/:name/dashboard', async (req, res) => {
+  const { name } = req.params;
+  try {
+    // Source metadata
+    const sourceRes = await pool.query(`SELECT * FROM simipipe.source WHERE name = $1`, [name]);
+    const source = sourceRes.rows[0] || { name, source_type: 'built-in' };
+
+    // Run history (last 30)
+    const historyRes = await pool.query(`
+      SELECT started_at, finished_at, status, rows, error
+      FROM simipipe.run_history
+      WHERE source_name = $1
+      ORDER BY started_at DESC LIMIT 30
+    `, [name]);
+
+    // Tables in this source's schema
+    const tablesRes = await pool.query(`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = $1
+      ORDER BY table_name
+    `, [name]);
+
+    // Get exact row counts per table
+    const tables = [];
+    for (const t of tablesRes.rows) {
+      const countRes = await pool.query(`SELECT COUNT(*) as cnt FROM "${name}"."${t.table_name}"`);
+      tables.push({ table: t.table_name, rows: parseInt(countRes.rows[0].cnt) });
+    }
+
+    // Column analysis per table
+    const tableDetails = {};
+    for (const t of tables) {
+      const colsRes = await pool.query(`
+        SELECT column_name, data_type
+        FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = $2
+        ORDER BY ordinal_position
+      `, [name, t.table]);
+
+      const columns = [];
+      for (const col of colsRes.rows) {
+        const c = { name: col.column_name, type: col.data_type, chart: null };
+
+        if (['integer', 'bigint', 'numeric', 'double precision', 'real', 'smallint'].includes(col.data_type)) {
+          // Numeric: stats + histogram
+          try {
+            const statsRes = await pool.query(`
+              SELECT MIN("${col.column_name}")::float as min_val,
+                     MAX("${col.column_name}")::float as max_val,
+                     AVG("${col.column_name}")::float as avg_val,
+                     STDDEV("${col.column_name}")::float as stddev_val
+              FROM "${name}"."${t.table}"
+              WHERE "${col.column_name}" IS NOT NULL
+            `);
+            const stats = statsRes.rows[0];
+            if (stats.min_val != null && stats.max_val != null && stats.min_val !== stats.max_val) {
+              const histRes = await pool.query(`
+                SELECT width_bucket("${col.column_name}"::float, $1::float, $2::float + 0.001, 10) as bucket,
+                       COUNT(*) as cnt
+                FROM "${name}"."${t.table}"
+                WHERE "${col.column_name}" IS NOT NULL
+                GROUP BY bucket ORDER BY bucket
+              `, [stats.min_val, stats.max_val]);
+              const step = (stats.max_val - stats.min_val) / 10;
+              c.chart = {
+                type: 'histogram',
+                stats: { min: stats.min_val, max: stats.max_val, avg: stats.avg_val, stddev: stats.stddev_val },
+                bins: histRes.rows.map(r => ({
+                  label: `${(stats.min_val + (r.bucket - 1) * step).toFixed(1)}`,
+                  count: parseInt(r.cnt),
+                })),
+              };
+            }
+          } catch { }
+        } else if (['timestamp without time zone', 'timestamp with time zone', 'date'].includes(col.data_type)) {
+          // Timestamp: range + weekly time series
+          try {
+            const tsRes = await pool.query(`
+              SELECT MIN("${col.column_name}") as min_ts, MAX("${col.column_name}") as max_ts,
+                     COUNT(*) as total
+              FROM "${name}"."${t.table}"
+              WHERE "${col.column_name}" IS NOT NULL
+            `);
+            if (tsRes.rows[0].total > 0) {
+              const seriesRes = await pool.query(`
+                SELECT date_trunc('week', "${col.column_name}") as week, COUNT(*) as cnt
+                FROM "${name}"."${t.table}"
+                WHERE "${col.column_name}" IS NOT NULL
+                GROUP BY week ORDER BY week
+              `);
+              c.chart = {
+                type: 'timeseries',
+                range: { min: tsRes.rows[0].min_ts, max: tsRes.rows[0].max_ts },
+                series: seriesRes.rows.map(r => ({ date: r.week, count: parseInt(r.cnt) })),
+              };
+            }
+          } catch { }
+        } else if (['character varying', 'text', 'character'].includes(col.data_type)) {
+          // Text: check cardinality
+          try {
+            const cardRes = await pool.query(`
+              SELECT COUNT(DISTINCT "${col.column_name}") as distinct_count
+              FROM "${name}"."${t.table}"
+              WHERE "${col.column_name}" IS NOT NULL
+            `);
+            const distinct = parseInt(cardRes.rows[0].distinct_count);
+            if (distinct > 0 && distinct <= 20) {
+              const valRes = await pool.query(`
+                SELECT "${col.column_name}" as val, COUNT(*) as cnt
+                FROM "${name}"."${t.table}"
+                WHERE "${col.column_name}" IS NOT NULL
+                GROUP BY val ORDER BY cnt DESC LIMIT 10
+              `);
+              c.chart = {
+                type: 'categorical',
+                distinctCount: distinct,
+                values: valRes.rows.map(r => ({ value: String(r.val), count: parseInt(r.cnt) })),
+              };
+            }
+          } catch { }
+        }
+
+        columns.push(c);
+      }
+      tableDetails[t.table] = columns;
+    }
+
+    res.json({
+      data: {
+        source: { name: source.name, type: source.source_type, schedule: source.schedule, lastRun: source.last_run, lastStatus: source.last_status, lastRows: source.last_rows },
+        history: historyRes.rows.reverse(),
+        tables,
+        tableDetails,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── API: DB connection test ──
 app.get('/api/health', async (req, res) => {
   try {
