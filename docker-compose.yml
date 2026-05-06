@@ -1,0 +1,42 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: simipipe
+      POSTGRES_USER: simipipe
+      POSTGRES_PASSWORD: simipipe
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U simipipe"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build: .
+    ports:
+      - "3002:3002"
+    environment:
+      PG_HOST: db
+      PG_PORT: 5432
+      PG_DATABASE: simipipe
+      PG_USER: simipipe
+      PG_PASSWORD: simipipe
+      SM_TOKEN: ${SM_TOKEN:-}
+      SM_BASE_URL: ${SM_BASE_URL:-https://api.eu.surveymonkey.com/v3}
+      SF_LOGIN_URL: ${SF_LOGIN_URL:-https://login.salesforce.com}
+      SF_USERNAME: ${SF_USERNAME:-}
+      SF_PASSWORD: ${SF_PASSWORD:-}
+      SF_SECURITY_TOKEN: ${SF_SECURITY_TOKEN:-}
+      SF_CLIENT_ID: ${SF_CLIENT_ID:-}
+      SF_CLIENT_SECRET: ${SF_CLIENT_SECRET:-}
+      SF_OBJECTS: ${SF_OBJECTS:-}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

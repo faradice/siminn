@@ -1,17 +1,133 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const cron = require('node-cron');
 const { pool, fullLoad } = require('./db');
 const axios = require('axios');
+
+const path = require('path');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Serve frontend build in production
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, '../web/dist')));
+}
+
 // ── Source registry ──
 const SOURCE_RUNNERS = {
   surveymonkey: () => require('./sources/surveymonkey'),
+  salesforce: () => require('./sources/salesforce'),
 };
+
+// ── Ensure simipipe tables exist ──
+async function ensureMetaTables() {
+  await pool.query(`CREATE SCHEMA IF NOT EXISTS simipipe`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS simipipe.source (
+      name TEXT PRIMARY KEY,
+      source_type TEXT,
+      url TEXT,
+      config JSONB,
+      schedule TEXT,
+      last_run TIMESTAMPTZ,
+      last_status TEXT,
+      last_rows INTEGER
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS simipipe.run_history (
+      id SERIAL PRIMARY KEY,
+      source_name TEXT NOT NULL,
+      started_at TIMESTAMPTZ DEFAULT NOW(),
+      finished_at TIMESTAMPTZ,
+      status TEXT,
+      rows INTEGER,
+      error TEXT
+    )
+  `);
+  // Add schedule column if missing (migration)
+  await pool.query(`
+    ALTER TABLE simipipe.source ADD COLUMN IF NOT EXISTS schedule TEXT
+  `).catch(() => {});
+}
+ensureMetaTables().catch(err => console.error('[DB] Meta table init failed:', err.message));
+
+// ── Run a source by name (shared logic) ──
+async function runSourceByName(name) {
+  const startedAt = new Date();
+  try {
+    let result;
+    if (SOURCE_RUNNERS[name]) {
+      const source = SOURCE_RUNNERS[name]();
+      result = await source.run();
+    } else {
+      throw new Error(`Source "${name}" not found`);
+    }
+
+    const totalRows = typeof result === 'object'
+      ? Object.values(result).reduce((s, v) => s + (typeof v === 'number' ? v : 0), 0)
+      : 0;
+
+    await pool.query(`
+      INSERT INTO simipipe.source (name, source_type, last_run, last_status, last_rows)
+      VALUES ($1, 'built-in', NOW(), 'success', $2)
+      ON CONFLICT (name) DO UPDATE SET last_run = NOW(), last_status = 'success', last_rows = $2
+    `, [name, totalRows]);
+
+    await pool.query(`
+      INSERT INTO simipipe.run_history (source_name, started_at, finished_at, status, rows)
+      VALUES ($1, $2, NOW(), 'success', $3)
+    `, [name, startedAt, totalRows]);
+
+    return result;
+  } catch (err) {
+    await pool.query(`
+      INSERT INTO simipipe.source (name, source_type, last_run, last_status, last_rows)
+      VALUES ($1, 'built-in', NOW(), 'error', 0)
+      ON CONFLICT (name) DO UPDATE SET last_run = NOW(), last_status = 'error'
+    `, [name]);
+
+    await pool.query(`
+      INSERT INTO simipipe.run_history (source_name, started_at, finished_at, status, error)
+      VALUES ($1, $2, NOW(), 'error', $3)
+    `, [name, startedAt, err.message]);
+
+    throw err;
+  }
+}
+
+// ── Scheduler ──
+const scheduledJobs = {};
+
+async function initScheduler() {
+  try {
+    const res = await pool.query(`SELECT name, schedule FROM simipipe.source WHERE schedule IS NOT NULL`);
+    for (const row of res.rows) {
+      scheduleSource(row.name, row.schedule);
+    }
+  } catch { }
+}
+
+function scheduleSource(name, cronExpr) {
+  if (scheduledJobs[name]) {
+    scheduledJobs[name].stop();
+    delete scheduledJobs[name];
+  }
+  if (!cronExpr || !cron.validate(cronExpr)) return;
+  console.log(`[Scheduler] ${name} → ${cronExpr}`);
+  scheduledJobs[name] = cron.schedule(cronExpr, async () => {
+    console.log(`[Scheduler] Running ${name}...`);
+    try {
+      await runSourceByName(name);
+      console.log(`[Scheduler] ${name} completed`);
+    } catch (err) {
+      console.error(`[Scheduler] ${name} failed:`, err.message);
+    }
+  });
+}
 
 // ── API: List schemas and tables ──
 app.get('/api/tables', async (req, res) => {
@@ -66,9 +182,7 @@ app.get('/api/tables/:schema/:table', async (req, res) => {
 
 // ── API: List configured sources ──
 app.get('/api/sources', async (req, res) => {
-  // For now, return registered source runners + any saved configs
   try {
-    // Check if config table exists
     const exists = await pool.query(
       `SELECT 1 FROM information_schema.tables WHERE table_schema = 'simipipe' AND table_name = 'source'`
     );
@@ -77,23 +191,23 @@ app.get('/api/sources', async (req, res) => {
       const result = await pool.query(`SELECT * FROM simipipe.source ORDER BY name`);
       saved = result.rows;
     }
-    // Merge with built-in sources
     const sources = Object.keys(SOURCE_RUNNERS).map((name) => {
       const s = saved.find((r) => r.name === name);
       return {
         name,
         type: 'built-in',
+        schedule: s?.schedule || null,
         lastRun: s?.last_run || null,
         lastStatus: s?.last_status || null,
         lastRows: s?.last_rows || null,
       };
     });
-    // Add any custom REST sources
     for (const s of saved.filter((r) => !SOURCE_RUNNERS[r.name])) {
       sources.push({
         name: s.name,
         type: s.source_type,
         url: s.url,
+        schedule: s.schedule,
         lastRun: s.last_run,
         lastStatus: s.last_status,
         lastRows: s.last_rows,
@@ -109,45 +223,30 @@ app.get('/api/sources', async (req, res) => {
 app.post('/api/sources/:name/run', async (req, res) => {
   const { name } = req.params;
   try {
-    let result;
-    if (SOURCE_RUNNERS[name]) {
-      const source = SOURCE_RUNNERS[name]();
-      result = await source.run();
-    } else {
-      // Check saved custom sources
-      const saved = await pool.query(
-        `SELECT * FROM simipipe.source WHERE name = $1`, [name]
-      );
-      if (!saved.rows.length) return res.status(404).json({ error: `Source "${name}" not found` });
-      const config = saved.rows[0];
-      result = await runCustomSource(config);
-    }
-
-    // Save run status
-    await pool.query(`CREATE SCHEMA IF NOT EXISTS simipipe`);
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS simipipe.source (
-        name TEXT PRIMARY KEY,
-        source_type TEXT,
-        url TEXT,
-        config JSONB,
-        last_run TIMESTAMPTZ,
-        last_status TEXT,
-        last_rows INTEGER
-      )
-    `);
-    const totalRows = typeof result === 'object'
-      ? Object.values(result).reduce((s, v) => s + (typeof v === 'number' ? v : 0), 0)
-      : 0;
-    await pool.query(`
-      INSERT INTO simipipe.source (name, source_type, last_run, last_status, last_rows)
-      VALUES ($1, 'built-in', NOW(), 'success', $2)
-      ON CONFLICT (name) DO UPDATE SET last_run = NOW(), last_status = 'success', last_rows = $2
-    `, [name, totalRows]);
-
+    const result = await runSourceByName(name);
     res.json({ data: result });
   } catch (err) {
     console.error(`[Run] ${name} failed:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── API: Set source schedule ──
+app.put('/api/sources/:name/schedule', async (req, res) => {
+  const { name } = req.params;
+  const { schedule } = req.body;
+  if (schedule && !cron.validate(schedule)) {
+    return res.status(400).json({ error: `Invalid cron: "${schedule}"` });
+  }
+  try {
+    await pool.query(`
+      INSERT INTO simipipe.source (name, source_type, schedule)
+      VALUES ($1, 'built-in', $2)
+      ON CONFLICT (name) DO UPDATE SET schedule = $2
+    `, [name, schedule || null]);
+    scheduleSource(name, schedule);
+    res.json({ data: { name, schedule: schedule || null } });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
@@ -177,7 +276,6 @@ app.post('/api/probe', async (req, res) => {
       info.sample = data.slice(0, 3);
     } else if (typeof data === 'object') {
       info.sampleKeys = Object.keys(data);
-      // Check for common paginated API patterns
       for (const key of ['data', 'results', 'items', 'records', 'rows']) {
         if (Array.isArray(data[key])) {
           info.dataPath = key;
@@ -210,7 +308,6 @@ app.post('/api/import', async (req, res) => {
     if (!Array.isArray(rows)) {
       rows = [rows];
     }
-    // Flatten nested objects
     rows = rows.map((row) => {
       const flat = {};
       for (const [k, v] of Object.entries(row)) {
@@ -232,6 +329,72 @@ app.post('/api/import', async (req, res) => {
   }
 });
 
+// ── API: Overview stats ──
+app.get('/api/overview', async (req, res) => {
+  try {
+    const [tables, sources, diskResult, healthResult, historyResult] = await Promise.all([
+      pool.query(`
+        SELECT t.table_schema, t.table_name,
+               COALESCE((SELECT reltuples::bigint FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relname = t.table_name AND n.nspname = t.table_schema), 0) as row_estimate
+        FROM information_schema.tables t
+        WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema')
+        ORDER BY t.table_schema, t.table_name
+      `),
+      pool.query(`SELECT * FROM simipipe.source ORDER BY name`).catch(() => ({ rows: [] })),
+      pool.query(`SELECT pg_database_size(current_database()) as size`).catch(() => ({ rows: [{ size: null }] })),
+      pool.query(`SELECT current_database(), current_user`).catch(() => ({ rows: [{}] })),
+      pool.query(`
+        SELECT source_name, status, rows, finished_at
+        FROM simipipe.run_history
+        ORDER BY finished_at DESC
+        LIMIT 100
+      `).catch(() => ({ rows: [] })),
+    ]);
+
+    const schemaMap = {};
+    for (const r of tables.rows) {
+      if (!schemaMap[r.table_schema]) schemaMap[r.table_schema] = [];
+      schemaMap[r.table_schema].push({ table: r.table_name, rows: parseInt(r.row_estimate) || 0 });
+    }
+    const schemas = Object.entries(schemaMap).map(([name, tbls]) => ({
+      name,
+      tables: tbls.length,
+      rows: tbls.reduce((s, t) => s + t.rows, 0),
+      topTables: tbls.sort((a, b) => b.rows - a.rows).slice(0, 5),
+    }));
+
+    // Build per-source run history (last 10 runs each)
+    const historyBySource = {};
+    for (const h of historyResult.rows) {
+      if (!historyBySource[h.source_name]) historyBySource[h.source_name] = [];
+      if (historyBySource[h.source_name].length < 10) {
+        historyBySource[h.source_name].push({ status: h.status, rows: h.rows || 0, at: h.finished_at });
+      }
+    }
+
+    res.json({
+      data: {
+        schemaCount: schemas.length,
+        tableCount: tables.rows.length,
+        totalRows: schemas.reduce((s, sc) => s + sc.rows, 0),
+        diskUsage: parseInt(diskResult.rows[0]?.size) || null,
+        health: { ...healthResult.rows[0], status: 'ok' },
+        sources: sources.rows.map(s => ({
+          name: s.name, type: s.source_type, lastRun: s.last_run,
+          lastStatus: s.last_status, lastRows: s.last_rows,
+          schedule: s.schedule,
+          history: (historyBySource[s.name] || []).reverse(),
+        })),
+        schemas,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── API: DB connection test ──
 app.get('/api/health', async (req, res) => {
   try {
@@ -242,5 +405,15 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
+// SPA fallback (production)
+if (process.env.NODE_ENV === 'production') {
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, '../web/dist/index.html'));
+  });
+}
+
 const PORT = process.env.PORT || 3002;
-app.listen(PORT, () => console.log(`[simipipe] http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`[simipipe] http://localhost:${PORT}`);
+  initScheduler();
+});
