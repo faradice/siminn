@@ -1,0 +1,44 @@
+# Source definitions — each source describes where to pull data and where to land it
+#
+# type: rest_api | postgres | mssql
+# schedule: cron expression (optional, for auto-run)
+# target: schema.table in local PostgreSQL
+# mode: full (truncate+insert) | incremental (upsert by key)
+
+sources:
+  # Example: REST API source
+  # - name: example_api
+  #   type: rest_api
+  #   url: https://api.example.com/data
+  #   headers:
+  #     Authorization: "Bearer ${ENV_TOKEN}"
+  #   pagination:
+  #     type: offset    # offset | cursor | link
+  #     pageSize: 100
+  #   target:
+  #     schema: staging
+  #     table: example_data
+  #     mode: full
+  #   transform:
+  #     root: data.items          # JSON path to array of records
+  #     flatten: true             # flatten nested objects
+  #     columns:                  # optional column mapping
+  #       id: item_id
+  #       name: item_name
+
+  # Example: Remote PostgreSQL source
+  # - name: example_db
+  #   type: postgres
+  #   connection:
+  #     host: remote-host.example.com
+  #     port: 5432
+  #     database: source_db
+  #     user: readonly
+  #     password: "${ENV_DB_PASS}"
+  #   query: "SELECT * FROM public.customers WHERE updated_at > $1"
+  #   params: ["${LAST_RUN}"]
+  #   target:
+  #     schema: staging
+  #     table: customers
+  #     mode: incremental
+  #     key: customer_id
