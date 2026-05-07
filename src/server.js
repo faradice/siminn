@@ -476,7 +476,7 @@ app.get('/api/overview', async (req, res) => {
                 JOIN pg_namespace n ON n.oid = c.relnamespace
                 WHERE c.relname = t.table_name AND n.nspname = t.table_schema), 0) as row_estimate
         FROM information_schema.tables t
-        WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema')
+        WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema', 'simipipe')
         ORDER BY t.table_schema, t.table_name
       `),
       db.pool.query(`SELECT * FROM simipipe.source ORDER BY name`).catch(() => ({ rows: [] })),
