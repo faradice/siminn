@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useFetch, API } from './shared';
-import { Clock, Calendar } from 'lucide-react';
+import { Clock, Calendar, ChevronDown, ChevronRight, KeyRound } from 'lucide-react';
 
 const SCHEDULE_PRESETS = [
   { label: 'Á hverri klukkustund', value: '0 * * * *' },
@@ -21,6 +21,10 @@ export default function SourcesPage({ onNavigate }) {
   const [probing, setProbing] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importTarget, setImportTarget] = useState({ schema: '', table: '' });
+  const [showOAuth, setShowOAuth] = useState(false);
+  const [oauth2, setOAuth2] = useState({ tokenUrl: '', clientId: '', clientSecret: '', username: '', password: '' });
+  const setOA = (k, v) => setOAuth2(o => ({ ...o, [k]: v }));
+  const hasOAuth = oauth2.tokenUrl.trim().length > 0;
 
   const runSource = async (name) => {
     setRunning(name);
@@ -57,7 +61,7 @@ export default function SourcesPage({ onNavigate }) {
       const resp = await fetch(`${API}/probe`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: probeUrl, headers }),
+        body: JSON.stringify({ url: probeUrl, headers, ...(hasOAuth && { oauth2 }) }),
       });
       const data = await resp.json();
       setProbeResult(data.data || data);
@@ -80,6 +84,7 @@ export default function SourcesPage({ onNavigate }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           url: probeUrl, headers,
+          ...(hasOAuth && { oauth2 }),
           schema: importTarget.schema,
           table: importTarget.table,
           dataPath: probeResult?.dataPath || null,
@@ -208,6 +213,22 @@ export default function SourcesPage({ onNavigate }) {
             placeholder='Hausar (valkvætt): {"Authorization": "Bearer ..."}'
             className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
           />
+
+          {/* OAuth2 */}
+          <button onClick={() => setShowOAuth(!showOAuth)} className="flex items-center gap-2 text-xs text-gray-400 hover:text-gray-200 transition-colors">
+            {showOAuth ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+            <KeyRound className="w-3.5 h-3.5" />
+            <span>OAuth2 {hasOAuth && <span className="text-emerald-400 ml-1">&#x2713;</span>}</span>
+          </button>
+          {showOAuth && (
+            <div className="grid grid-cols-2 gap-2 p-3 bg-gray-900/40 rounded-lg border border-gray-700/30">
+              <input value={oauth2.tokenUrl} onChange={e => setOA('tokenUrl', e.target.value)} placeholder="Token URL" className="col-span-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+              <input value={oauth2.clientId} onChange={e => setOA('clientId', e.target.value)} placeholder="Client ID" className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+              <input value={oauth2.clientSecret} onChange={e => setOA('clientSecret', e.target.value)} placeholder="Client Secret" type="password" className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+              <input value={oauth2.username} onChange={e => setOA('username', e.target.value)} placeholder="Username" className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+              <input value={oauth2.password} onChange={e => setOA('password', e.target.value)} placeholder="Password" type="password" className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+            </div>
+          )}
         </div>
 
         {probeResult && !probeResult.error && (

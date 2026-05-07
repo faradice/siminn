@@ -253,13 +253,34 @@ app.put('/api/sources/:name/schedule', async (req, res) => {
   }
 });
 
+// ── OAuth2 token helper ──
+async function resolveHeaders(headers, oauth2) {
+  const h = { ...(headers || {}) };
+  if (oauth2?.tokenUrl) {
+    const body = new URLSearchParams({
+      grant_type: 'password',
+      client_id: oauth2.clientId || '',
+      client_secret: oauth2.clientSecret || '',
+      username: oauth2.username || '',
+      password: oauth2.password || '',
+    });
+    const tokenResp = await axios.post(oauth2.tokenUrl, body.toString(), {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: 10000,
+    });
+    h.Authorization = `Bearer ${tokenResp.data.access_token}`;
+  }
+  return h;
+}
+
 // ── API: Probe a REST API ──
 app.post('/api/probe', async (req, res) => {
-  const { url, headers } = req.body;
+  const { url, headers, oauth2 } = req.body;
   if (!url) return res.status(400).json({ error: 'URL required' });
   try {
+    const resolvedHeaders = await resolveHeaders(headers, oauth2);
     const resp = await axios.get(url, {
-      headers: headers || {},
+      headers: resolvedHeaders,
       timeout: 10000,
     });
     const data = resp.data;
@@ -297,12 +318,13 @@ app.post('/api/probe', async (req, res) => {
 
 // ── API: Import from probed API ──
 app.post('/api/import', async (req, res) => {
-  const { url, headers, schema, table, dataPath } = req.body;
+  const { url, headers, oauth2, schema, table, dataPath } = req.body;
   if (!url || !schema || !table) {
     return res.status(400).json({ error: 'url, schema, and table required' });
   }
   try {
-    const resp = await axios.get(url, { headers: headers || {}, timeout: 30000 });
+    const resolvedHeaders = await resolveHeaders(headers, oauth2);
+    const resp = await axios.get(url, { headers: resolvedHeaders, timeout: 30000 });
     let rows = resp.data;
     if (dataPath) {
       rows = dataPath.split('.').reduce((o, k) => o?.[k], rows);
