@@ -12,6 +12,7 @@ const SCHEDULE_PRESETS = [
 
 export default function SourcesPage({ onNavigate }) {
   const { data: sources, loading, refetch } = useFetch('/sources');
+  const { data: savedSecrets } = useFetch('/secrets');
   const [running, setRunning] = useState(null);
   const [result, setResult] = useState(null);
   const [editSchedule, setEditSchedule] = useState(null);
@@ -25,6 +26,20 @@ export default function SourcesPage({ onNavigate }) {
   const [oauth2, setOAuth2] = useState({ tokenUrl: '', clientId: '', clientSecret: '', username: '', password: '' });
   const setOA = (k, v) => setOAuth2(o => ({ ...o, [k]: v }));
   const hasOAuth = oauth2.tokenUrl.trim().length > 0;
+  const [secretUrls, setSecretUrls] = useState([]);
+
+  const loadSecret = async (name) => {
+    const resp = await fetch(`${API}/secrets/${name}`);
+    const { data } = await resp.json();
+    if (data.oauth2) {
+      setOAuth2(data.oauth2);
+      setShowOAuth(true);
+    }
+    if (data.urls?.length) setProbeUrl(data.urls[0]);
+    setSecretUrls(data.urls || []);
+    setImportTarget(t => ({ ...t, schema: data.name || '' }));
+    setProbeResult(null);
+  };
 
   const runSource = async (name) => {
     setRunning(name);
@@ -187,9 +202,31 @@ export default function SourcesPage({ onNavigate }) {
 
       {/* Probe + Import */}
       <div className="bg-gray-800/60 rounded-xl p-6 border border-gray-700/50">
-        <h2 className="text-lg font-semibold text-white mb-1">Ný uppspretta</h2>
+        <div className="flex items-center gap-3 mb-1">
+          <h2 className="text-lg font-semibold text-white">Ný uppspretta</h2>
+          {savedSecrets?.length > 0 && (
+            <div className="flex gap-1">
+              {savedSecrets.map(s => (
+                <button key={s.name} onClick={() => loadSecret(s.name)}
+                  className="text-[10px] px-2 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600 transition-colors">
+                  {s.name} {s.hasOAuth && <KeyRound className="w-2.5 h-2.5 inline ml-0.5" />}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <p className="text-sm text-gray-500 mb-4">Sláðu inn REST API slóð til að skoða gögnin og flytja í gagnagrunn</p>
         <div className="space-y-3">
+          {secretUrls.length > 1 && (
+            <div className="flex gap-1 flex-wrap">
+              {secretUrls.map(u => (
+                <button key={u} onClick={() => { setProbeUrl(u); setProbeResult(null); setImportTarget(t => ({ ...t, table: u.split('/').pop()?.toLowerCase() || 'data' })); }}
+                  className={`text-xs px-2 py-1 rounded transition-colors ${probeUrl === u ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>
+                  {u.split('/').pop()}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="flex gap-2">
             <input
               type="text"

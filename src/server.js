@@ -253,6 +253,34 @@ app.put('/api/sources/:name/schedule', async (req, res) => {
   }
 });
 
+// ── API: Saved secrets ──
+const SECRETS_DIR = path.join(__dirname, '../secrets');
+
+app.get('/api/secrets', (req, res) => {
+  try {
+    if (!fs.existsSync(SECRETS_DIR)) return res.json({ data: [] });
+    const files = fs.readdirSync(SECRETS_DIR).filter(f => f.endsWith('.json'));
+    const secrets = files.map(f => {
+      const d = JSON.parse(fs.readFileSync(path.join(SECRETS_DIR, f), 'utf8'));
+      return { name: d.name, urls: d.urls || [], hasOAuth: !!d.oauth2?.tokenUrl };
+    });
+    res.json({ data: secrets });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/secrets/:name', (req, res) => {
+  try {
+    const file = path.join(SECRETS_DIR, `${req.params.name}.json`);
+    if (!fs.existsSync(file)) return res.status(404).json({ error: 'Not found' });
+    const d = JSON.parse(fs.readFileSync(file, 'utf8'));
+    res.json({ data: d });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── OAuth2 token helper ──
 async function resolveHeaders(headers, oauth2) {
   const h = { ...(headers || {}) };
