@@ -57,14 +57,57 @@ async function ensureMetaTables() {
 }
 ensureMetaTables().catch(err => console.error('[DB] Meta table init failed:', err.message));
 
+// ── Helpers for REST sources ──
+function extractRows(data) {
+  if (Array.isArray(data)) return data;
+  if (typeof data === 'object') {
+    for (const key of ['data', 'results', 'items', 'records', 'rows', 'value']) {
+      if (Array.isArray(data[key])) return data[key];
+    }
+  }
+  return [data];
+}
+
+function flattenRow(row) {
+  const flat = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      for (const [k2, v2] of Object.entries(v)) {
+        flat[`${k}_${k2}`] = v2;
+      }
+    } else {
+      flat[k] = v;
+    }
+  }
+  return flat;
+}
+
+async function runSecretSource(name) {
+  const secretFile = path.join(SECRETS_DIR, `${name}.json`);
+  const secret = JSON.parse(fs.readFileSync(secretFile, 'utf8'));
+  const headers = await resolveHeaders(secret.headers || {}, secret.oauth2);
+  const summary = {};
+  for (const url of (secret.urls || [])) {
+    const tableName = url.split('/').pop()?.replace(/[^a-z0-9_]/gi, '_').toLowerCase() || 'data';
+    const resp = await axios.get(url, { headers, timeout: 120000 });
+    const rows = extractRows(resp.data).map(flattenRow);
+    summary[tableName] = rows.length > 0 ? await fullLoad(name, tableName, rows) : 0;
+    console.log(`  [REST] ${name}.${tableName}: ${summary[tableName]} rows`);
+  }
+  return summary;
+}
+
 // ── Run a source by name (shared logic) ──
 async function runSourceByName(name) {
   const startedAt = new Date();
+  const sourceType = SOURCE_RUNNERS[name] ? 'built-in' : 'rest';
   try {
     let result;
     if (SOURCE_RUNNERS[name]) {
       const source = SOURCE_RUNNERS[name]();
       result = await source.run();
+    } else if (fs.existsSync(path.join(SECRETS_DIR, `${name}.json`))) {
+      result = await runSecretSource(name);
     } else {
       throw new Error(`Source "${name}" not found`);
     }
@@ -75,9 +118,9 @@ async function runSourceByName(name) {
 
     await db.pool.query(`
       INSERT INTO simipipe.source (name, source_type, last_run, last_status, last_rows)
-      VALUES ($1, 'built-in', NOW(), 'success', $2)
-      ON CONFLICT (name) DO UPDATE SET last_run = NOW(), last_status = 'success', last_rows = $2
-    `, [name, totalRows]);
+      VALUES ($1, $2, NOW(), 'success', $3)
+      ON CONFLICT (name) DO UPDATE SET last_run = NOW(), last_status = 'success', last_rows = $3
+    `, [name, sourceType, totalRows]);
 
     await db.pool.query(`
       INSERT INTO simipipe.run_history (source_name, started_at, finished_at, status, rows)
@@ -88,9 +131,9 @@ async function runSourceByName(name) {
   } catch (err) {
     await db.pool.query(`
       INSERT INTO simipipe.source (name, source_type, last_run, last_status, last_rows)
-      VALUES ($1, 'built-in', NOW(), 'error', 0)
+      VALUES ($1, $2, NOW(), 'error', 0)
       ON CONFLICT (name) DO UPDATE SET last_run = NOW(), last_status = 'error'
-    `, [name]);
+    `, [name, sourceType]);
 
     await db.pool.query(`
       INSERT INTO simipipe.run_history (source_name, started_at, finished_at, status, error)
@@ -204,17 +247,38 @@ app.get('/api/sources', async (req, res) => {
         lastRows: s?.last_rows || null,
       };
     });
+    // Merge saved non-built-in sources, enriched with secret metadata
+    const addedNames = new Set(sources.map(s => s.name));
     for (const s of saved.filter((r) => !SOURCE_RUNNERS[r.name])) {
+      let urls = [], hasOAuth = false;
+      try {
+        const sf = path.join(SECRETS_DIR, `${s.name}.json`);
+        if (fs.existsSync(sf)) {
+          const sec = JSON.parse(fs.readFileSync(sf, 'utf8'));
+          urls = sec.urls || [];
+          hasOAuth = !!sec.oauth2?.tokenUrl;
+        }
+      } catch {}
+      addedNames.add(s.name);
       sources.push({
-        name: s.name,
-        type: s.source_type,
-        url: s.url,
-        schedule: s.schedule,
-        lastRun: s.last_run,
-        lastStatus: s.last_status,
-        lastRows: s.last_rows,
+        name: s.name, type: s.source_type || 'rest', urls, hasOAuth,
+        schedule: s.schedule, lastRun: s.last_run, lastStatus: s.last_status, lastRows: s.last_rows,
       });
     }
+    // Add secret-based sources that have never been run
+    try {
+      if (fs.existsSync(SECRETS_DIR)) {
+        for (const f of fs.readdirSync(SECRETS_DIR).filter(f => f.endsWith('.json'))) {
+          const sec = JSON.parse(fs.readFileSync(path.join(SECRETS_DIR, f), 'utf8'));
+          const name = sec.name || f.replace('.json', '');
+          if (addedNames.has(name)) continue;
+          sources.push({
+            name, type: 'rest', urls: sec.urls || [], hasOAuth: !!sec.oauth2?.tokenUrl,
+            schedule: null, lastRun: null, lastStatus: null, lastRows: null,
+          });
+        }
+      }
+    } catch {}
     res.json({ data: sources });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -276,6 +340,27 @@ app.get('/api/secrets/:name', (req, res) => {
     if (!fs.existsSync(file)) return res.status(404).json({ error: 'Not found' });
     const d = JSON.parse(fs.readFileSync(file, 'utf8'));
     res.json({ data: d });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/secrets/:name', (req, res) => {
+  try {
+    if (!fs.existsSync(SECRETS_DIR)) fs.mkdirSync(SECRETS_DIR, { recursive: true });
+    const file = path.join(SECRETS_DIR, `${req.params.name}.json`);
+    fs.writeFileSync(file, JSON.stringify(req.body, null, 2));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/secrets/:name', (req, res) => {
+  try {
+    const file = path.join(SECRETS_DIR, `${req.params.name}.json`);
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

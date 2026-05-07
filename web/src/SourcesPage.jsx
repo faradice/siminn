@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useFetch, API } from './shared';
-import { Clock, Calendar, ChevronDown, ChevronRight, KeyRound } from 'lucide-react';
+import { Clock, Calendar, ChevronDown, ChevronUp, Search, Pencil, Plus, KeyRound } from 'lucide-react';
 
 const SCHEDULE_PRESETS = [
   { label: 'Á hverri klukkustund', value: '0 * * * *' },
@@ -12,34 +12,11 @@ const SCHEDULE_PRESETS = [
 
 export default function SourcesPage({ onNavigate }) {
   const { data: sources, loading, refetch } = useFetch('/sources');
-  const { data: savedSecrets } = useFetch('/secrets');
   const [running, setRunning] = useState(null);
   const [result, setResult] = useState(null);
   const [editSchedule, setEditSchedule] = useState(null);
-  const [probeUrl, setProbeUrl] = useState('');
-  const [probeHeaders, setProbeHeaders] = useState('');
-  const [probeResult, setProbeResult] = useState(null);
-  const [probing, setProbing] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [importTarget, setImportTarget] = useState({ schema: '', table: '' });
-  const [showOAuth, setShowOAuth] = useState(false);
-  const [oauth2, setOAuth2] = useState({ tokenUrl: '', clientId: '', clientSecret: '', username: '', password: '' });
-  const setOA = (k, v) => setOAuth2(o => ({ ...o, [k]: v }));
-  const hasOAuth = oauth2.tokenUrl.trim().length > 0;
-  const [secretUrls, setSecretUrls] = useState([]);
-
-  const loadSecret = async (name) => {
-    const resp = await fetch(`${API}/secrets/${name}`);
-    const { data } = await resp.json();
-    if (data.oauth2) {
-      setOAuth2(data.oauth2);
-      setShowOAuth(true);
-    }
-    if (data.urls?.length) setProbeUrl(data.urls[0]);
-    setSecretUrls(data.urls || []);
-    setImportTarget(t => ({ ...t, schema: data.name || '' }));
-    setProbeResult(null);
-  };
+  const [expanded, setExpanded] = useState(null); // source name with open probe panel
+  const [probeState, setProbeState] = useState({ url: '', urls: [], result: null, probing: false, importing: false, schema: '', table: '' });
 
   const runSource = async (name) => {
     setRunning(name);
@@ -47,10 +24,10 @@ export default function SourcesPage({ onNavigate }) {
     try {
       const resp = await fetch(`${API}/sources/${name}/run`, { method: 'POST' });
       const data = await resp.json();
-      setResult(data.data || data);
+      setResult({ name, data: data.data || data });
       refetch();
     } catch (err) {
-      setResult({ error: err.message });
+      setResult({ name, data: { error: err.message } });
     }
     setRunning(null);
   };
@@ -65,268 +42,242 @@ export default function SourcesPage({ onNavigate }) {
     refetch();
   };
 
-  const probeApi = async () => {
-    setProbing(true);
-    setProbeResult(null);
+  const toggleProbe = async (name) => {
+    if (expanded === name) { setExpanded(null); return; }
+    setExpanded(name);
+    setProbeState({ url: '', urls: [], result: null, probing: false, importing: false, schema: name, table: '' });
     try {
-      let headers = {};
-      if (probeHeaders.trim()) {
-        try { headers = JSON.parse(probeHeaders); } catch { }
+      const r = await fetch(`${API}/secrets/${name}`);
+      if (r.ok) {
+        const { data } = await r.json();
+        const urls = data.urls || [];
+        setProbeState(s => ({ ...s, urls, url: urls[0] || '', table: urls[0]?.split('/').pop()?.toLowerCase() || 'data' }));
       }
+    } catch {}
+  };
+
+  const probe = async () => {
+    const src = sources?.find(s => s.name === expanded);
+    setProbeState(s => ({ ...s, probing: true, result: null }));
+    try {
+      // Load secret for OAuth2
+      let oauth2 = null;
+      try {
+        const sr = await fetch(`${API}/secrets/${expanded}`);
+        if (sr.ok) { const { data } = await sr.json(); oauth2 = data.oauth2; }
+      } catch {}
       const resp = await fetch(`${API}/probe`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: probeUrl, headers, ...(hasOAuth && { oauth2 }) }),
+        body: JSON.stringify({ url: probeState.url, ...(oauth2?.tokenUrl && { oauth2 }) }),
       });
       const data = await resp.json();
-      setProbeResult(data.data || data);
-      setImportTarget({ schema: 'imported', table: probeUrl.split('/').pop()?.replace(/[^a-z0-9]/gi, '_') || 'data' });
+      setProbeState(s => ({ ...s, result: data.data || data, probing: false }));
     } catch (err) {
-      setProbeResult({ error: err.message });
+      setProbeState(s => ({ ...s, result: { error: err.message }, probing: false }));
     }
-    setProbing(false);
   };
 
   const importData = async () => {
-    setImporting(true);
+    setProbeState(s => ({ ...s, importing: true }));
     try {
-      let headers = {};
-      if (probeHeaders.trim()) {
-        try { headers = JSON.parse(probeHeaders); } catch { }
-      }
+      let oauth2 = null;
+      try {
+        const sr = await fetch(`${API}/secrets/${expanded}`);
+        if (sr.ok) { const { data } = await sr.json(); oauth2 = data.oauth2; }
+      } catch {}
       const resp = await fetch(`${API}/import`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          url: probeUrl, headers,
-          ...(hasOAuth && { oauth2 }),
-          schema: importTarget.schema,
-          table: importTarget.table,
-          dataPath: probeResult?.dataPath || null,
+          url: probeState.url, ...(oauth2?.tokenUrl && { oauth2 }),
+          schema: probeState.schema, table: probeState.table,
+          dataPath: probeState.result?.dataPath || null,
         }),
       });
       const data = await resp.json();
-      setResult(data.data || data);
+      setResult({ name: expanded, data: data.data || data });
+      refetch();
     } catch (err) {
-      setResult({ error: err.message });
+      setResult({ name: expanded, data: { error: err.message } });
     }
-    setImporting(false);
+    setProbeState(s => ({ ...s, importing: false }));
   };
 
   return (
     <div className="space-y-6">
-      {/* Built-in sources */}
       <div className="bg-gray-800/60 rounded-xl p-6 border border-gray-700/50">
-        <h2 className="text-lg font-semibold text-white mb-1">Uppsprettur</h2>
-        <p className="text-sm text-gray-500 mb-4">Skráðar gagnalindir — smelltu á „Keyra" til að sækja gögn</p>
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-lg font-semibold text-white mb-1">Uppsprettur</h2>
+            <p className="text-sm text-gray-500">Allar gagnalindir — smelltu á „Keyra" til að sækja gögn</p>
+          </div>
+          <button onClick={() => onNavigate('settings')}
+            className="px-3 py-1.5 text-xs rounded-lg border border-gray-600 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-colors flex items-center gap-1.5">
+            <Plus className="w-3.5 h-3.5" /> Bæta við
+          </button>
+        </div>
+
         {loading ? (
           <div className="text-gray-500 text-sm">Hleð...</div>
         ) : (
           <div className="space-y-2">
             {sources?.map((s) => (
-              <div key={s.name} className="flex items-center gap-4 p-4 bg-gray-900/50 rounded-lg border border-gray-700/30">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => onNavigate('source-dashboard', s.name)} className="text-sm font-medium text-white hover:text-blue-400 transition-colors">{s.name}</button>
-                    {s.schedule && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/20 flex items-center gap-1">
-                        <Calendar className="w-2.5 h-2.5" />{s.schedule}
+              <div key={s.name}>
+                {/* Source card */}
+                <div className={`flex items-center gap-4 p-4 bg-gray-900/50 rounded-lg border border-gray-700/30 ${expanded === s.name ? 'rounded-b-none border-b-0' : ''}`}>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => onNavigate('source-dashboard', s.name)} className="text-sm font-medium text-white hover:text-blue-400 transition-colors">{s.name}</button>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${s.type === 'built-in' ? 'bg-blue-500/15 text-blue-400 border border-blue-500/20' : 'bg-amber-500/15 text-amber-400 border border-amber-500/20'}`}>
+                        {s.type === 'built-in' ? 'built-in' : 'REST'}
                       </span>
+                      {s.hasOAuth && <KeyRound className="w-3 h-3 text-amber-500/60" />}
+                      {s.schedule && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-700/50 text-gray-400 flex items-center gap-1">
+                          <Calendar className="w-2.5 h-2.5" />{s.schedule}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      {s.lastRun ? `síðast keyrt ${new Date(s.lastRun).toLocaleString('is-IS')}` : 'ekki keyrt'}
+                    </div>
+                  </div>
+
+                  {/* Schedule */}
+                  {editSchedule === s.name ? (
+                    <div className="flex gap-1">
+                      {SCHEDULE_PRESETS.map(p => (
+                        <button key={p.value} onClick={() => setSchedule(s.name, p.value)}
+                          className={`text-[10px] px-2 py-1 rounded transition-colors ${s.schedule === p.value ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <button onClick={() => setEditSchedule(s.name)} className="p-1.5 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-700/50 transition-colors" title="Tímasetja">
+                      <Clock className="w-4 h-4" />
+                    </button>
+                  )}
+
+                  {s.lastRows != null && <span className="text-xs text-gray-500">{s.lastRows.toLocaleString()} raðir</span>}
+
+                  <span className={`text-xs px-2 py-0.5 rounded ${s.lastStatus === 'success' ? 'bg-green-500/20 text-green-400' : s.lastStatus ? 'bg-red-500/20 text-red-400' : 'bg-gray-700 text-gray-400'}`}>
+                    {s.lastStatus || '—'}
+                  </span>
+
+                  {/* Actions */}
+                  {(s.type !== 'built-in' || s.urls?.length > 0) && (
+                    <button onClick={() => toggleProbe(s.name)} title="Skoða API"
+                      className={`p-1.5 rounded-lg transition-colors ${expanded === s.name ? 'bg-blue-600/20 text-blue-400' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-700/50'}`}>
+                      {expanded === s.name ? <ChevronUp className="w-4 h-4" /> : <Search className="w-4 h-4" />}
+                    </button>
+                  )}
+
+                  <button onClick={() => runSource(s.name)} disabled={running === s.name}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${running === s.name
+                      ? 'bg-gray-700 text-gray-400 cursor-wait'
+                      : 'bg-emerald-600/20 border border-emerald-500/40 text-emerald-400 hover:bg-emerald-600/30'}`}>
+                    {running === s.name ? 'Keyrir...' : 'Keyra'}
+                  </button>
+
+                  <button onClick={() => onNavigate('settings')} title="Breyta" className="p-1.5 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-700/50 transition-colors">
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {/* Inline probe panel */}
+                {expanded === s.name && (
+                  <div className="p-4 bg-gray-900/30 border border-gray-700/30 border-t-0 rounded-b-lg space-y-3">
+                    {/* URL selector */}
+                    {probeState.urls.length > 1 && (
+                      <div className="flex gap-1 flex-wrap">
+                        {probeState.urls.map(u => (
+                          <button key={u} onClick={() => setProbeState(ps => ({ ...ps, url: u, result: null, table: u.split('/').pop()?.toLowerCase() || 'data' }))}
+                            className={`text-xs px-2 py-1 rounded transition-colors ${probeState.url === u ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>
+                            {u.split('/').pop()}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="flex gap-2">
+                      <input type="text" value={probeState.url} onChange={e => setProbeState(ps => ({ ...ps, url: e.target.value }))}
+                        placeholder="https://api.example.com/data"
+                        className="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                      <button onClick={probe} disabled={probeState.probing || !probeState.url}
+                        className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600/20 border border-blue-500/40 text-blue-400 hover:bg-blue-600/30 transition-colors disabled:opacity-40">
+                        {probeState.probing ? 'Skoða...' : 'Skoða API'}
+                      </button>
+                    </div>
+
+                    {/* Probe result */}
+                    {probeState.result && !probeState.result.error && (
+                      <div className="space-y-3">
+                        <div className="flex items-center gap-3 text-sm">
+                          <span className="px-2 py-0.5 rounded bg-green-500/20 text-green-400">{probeState.result.status}</span>
+                          {probeState.result.rowCount != null && <span className="text-gray-400">{probeState.result.rowCount.toLocaleString()} raðir</span>}
+                        </div>
+                        {probeState.result.sampleKeys && (
+                          <div>
+                            <div className="text-xs text-gray-500 mb-1">Dálkar ({probeState.result.sampleKeys.length})</div>
+                            <div className="flex flex-wrap gap-1">
+                              {probeState.result.sampleKeys.map(k => (
+                                <span key={k} className="text-xs px-2 py-0.5 rounded bg-gray-700 text-gray-300">{k}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {probeState.result.sample && (
+                          <pre className="text-xs text-gray-400 bg-gray-900/60 rounded-lg p-3 max-h-48 overflow-auto">
+                            {JSON.stringify(probeState.result.sample, null, 2)}
+                          </pre>
+                        )}
+                        <div className="flex items-end gap-2 pt-2 border-t border-gray-700/50">
+                          <div>
+                            <label className="text-xs text-gray-500">Schema</label>
+                            <input type="text" value={probeState.schema} onChange={e => setProbeState(ps => ({ ...ps, schema: e.target.value }))}
+                              className="block w-32 bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                          </div>
+                          <div>
+                            <label className="text-xs text-gray-500">Tafla</label>
+                            <input type="text" value={probeState.table} onChange={e => setProbeState(ps => ({ ...ps, table: e.target.value }))}
+                              className="block w-48 bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                          </div>
+                          <button onClick={importData} disabled={probeState.importing || !probeState.schema || !probeState.table}
+                            className="px-4 py-2 rounded-lg text-sm font-medium bg-emerald-600/20 border border-emerald-500/40 text-emerald-400 hover:bg-emerald-600/30 transition-colors disabled:opacity-40">
+                            {probeState.importing ? 'Flyt inn...' : 'Flytja inn'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {probeState.result?.error && (
+                      <div className="text-sm text-red-400">{probeState.result.error}</div>
                     )}
                   </div>
-                  <div className="text-xs text-gray-500">{s.type}{s.lastRun ? ` — síðast keyrt ${new Date(s.lastRun).toLocaleString('is-IS')}` : ''}</div>
-                </div>
-                {/* Schedule control */}
-                {editSchedule === s.name ? (
-                  <div className="flex gap-1">
-                    {SCHEDULE_PRESETS.map(p => (
-                      <button
-                        key={p.value}
-                        onClick={() => setSchedule(s.name, p.value)}
-                        className={`text-[10px] px-2 py-1 rounded transition-colors ${s.schedule === p.value
-                          ? 'bg-blue-600 text-white'
-                          : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                        }`}
-                      >
-                        {p.label}
-                      </button>
-                    ))}
+                )}
+
+                {/* Run result for this source */}
+                {result?.name === s.name && (
+                  <div className="mt-1 p-4 rounded-lg bg-gray-900/60 border border-gray-700/30">
+                    <div className="text-xs font-medium text-gray-400 mb-2">Niðurstaða</div>
+                    {result.data.error ? (
+                      <div className="text-sm text-red-400">{result.data.error}</div>
+                    ) : (
+                      <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                        {Object.entries(result.data).map(([k, v]) => (
+                          <div key={k} className="bg-gray-800/60 rounded-lg p-2 text-center">
+                            <div className="text-lg font-bold text-white">{typeof v === 'number' ? v.toLocaleString() : v}</div>
+                            <div className="text-[10px] text-gray-500">{k}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                ) : (
-                  <button
-                    onClick={() => setEditSchedule(s.name)}
-                    className="p-1.5 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-700/50 transition-colors"
-                    title="Tímasetja"
-                  >
-                    <Clock className="w-4 h-4" />
-                  </button>
                 )}
-                {s.lastRows != null && (
-                  <span className="text-xs text-gray-500">{s.lastRows} raðir</span>
-                )}
-                <span className={`text-xs px-2 py-0.5 rounded ${s.lastStatus === 'success' ? 'bg-green-500/20 text-green-400' : s.lastStatus ? 'bg-red-500/20 text-red-400' : 'bg-gray-700 text-gray-400'}`}>
-                  {s.lastStatus || 'ekki keyrt'}
-                </span>
-                <button
-                  onClick={() => runSource(s.name)}
-                  disabled={running === s.name}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${running === s.name
-                    ? 'bg-gray-700 text-gray-400 cursor-wait'
-                    : 'bg-emerald-600/20 border border-emerald-500/40 text-emerald-400 hover:bg-emerald-600/30'
-                    }`}
-                >
-                  {running === s.name ? 'Keyrir...' : 'Keyra'}
-                </button>
               </div>
             ))}
           </div>
-        )}
-        {result && (
-          <div className="mt-4 p-4 rounded-lg bg-gray-900/60 border border-gray-700/30">
-            <div className="text-xs font-medium text-gray-400 mb-2">Niðurstaða</div>
-            {result.error ? (
-              <div className="text-sm text-red-400">{result.error}</div>
-            ) : (
-              <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
-                {Object.entries(result).map(([k, v]) => (
-                  <div key={k} className="bg-gray-800/60 rounded-lg p-2 text-center">
-                    <div className="text-lg font-bold text-white">{typeof v === 'number' ? v.toLocaleString() : v}</div>
-                    <div className="text-[10px] text-gray-500">{k}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Probe + Import */}
-      <div className="bg-gray-800/60 rounded-xl p-6 border border-gray-700/50">
-        <div className="flex items-center gap-3 mb-1">
-          <h2 className="text-lg font-semibold text-white">Ný uppspretta</h2>
-          {savedSecrets?.length > 0 && (
-            <div className="flex gap-1">
-              {savedSecrets.map(s => (
-                <button key={s.name} onClick={() => loadSecret(s.name)}
-                  className="text-[10px] px-2 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600 transition-colors">
-                  {s.name} {s.hasOAuth && <KeyRound className="w-2.5 h-2.5 inline ml-0.5" />}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-        <p className="text-sm text-gray-500 mb-4">Sláðu inn REST API slóð til að skoða gögnin og flytja í gagnagrunn</p>
-        <div className="space-y-3">
-          {secretUrls.length > 1 && (
-            <div className="flex gap-1 flex-wrap">
-              {secretUrls.map(u => (
-                <button key={u} onClick={() => { setProbeUrl(u); setProbeResult(null); setImportTarget(t => ({ ...t, table: u.split('/').pop()?.toLowerCase() || 'data' })); }}
-                  className={`text-xs px-2 py-1 rounded transition-colors ${probeUrl === u ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>
-                  {u.split('/').pop()}
-                </button>
-              ))}
-            </div>
-          )}
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={probeUrl}
-              onChange={(e) => setProbeUrl(e.target.value)}
-              placeholder="https://api.example.com/data"
-              className="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
-            />
-            <button
-              onClick={probeApi}
-              disabled={probing || !probeUrl}
-              className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600/20 border border-blue-500/40 text-blue-400 hover:bg-blue-600/30 transition-colors disabled:opacity-40"
-            >
-              {probing ? 'Skoða...' : 'Skoða API'}
-            </button>
-          </div>
-          <input
-            type="text"
-            value={probeHeaders}
-            onChange={(e) => setProbeHeaders(e.target.value)}
-            placeholder='Hausar (valkvætt): {"Authorization": "Bearer ..."}'
-            className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
-          />
-
-          {/* OAuth2 */}
-          <button onClick={() => setShowOAuth(!showOAuth)} className="flex items-center gap-2 text-xs text-gray-400 hover:text-gray-200 transition-colors">
-            {showOAuth ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-            <KeyRound className="w-3.5 h-3.5" />
-            <span>OAuth2 {hasOAuth && <span className="text-emerald-400 ml-1">&#x2713;</span>}</span>
-          </button>
-          {showOAuth && (
-            <div className="grid grid-cols-2 gap-2 p-3 bg-gray-900/40 rounded-lg border border-gray-700/30">
-              <input value={oauth2.tokenUrl} onChange={e => setOA('tokenUrl', e.target.value)} placeholder="Token URL" className="col-span-2 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-              <input value={oauth2.clientId} onChange={e => setOA('clientId', e.target.value)} placeholder="Client ID" className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-              <input value={oauth2.clientSecret} onChange={e => setOA('clientSecret', e.target.value)} placeholder="Client Secret" type="password" className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-              <input value={oauth2.username} onChange={e => setOA('username', e.target.value)} placeholder="Username" className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-              <input value={oauth2.password} onChange={e => setOA('password', e.target.value)} placeholder="Password" type="password" className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-            </div>
-          )}
-        </div>
-
-        {probeResult && !probeResult.error && (
-          <div className="mt-4 space-y-3">
-            <div className="flex items-center gap-3 text-sm">
-              <span className="px-2 py-0.5 rounded bg-green-500/20 text-green-400">{probeResult.status}</span>
-              <span className="text-gray-400">{probeResult.contentType}</span>
-              {probeResult.rowCount != null && <span className="text-gray-400">{probeResult.rowCount} raðir</span>}
-              {probeResult.dataPath && <span className="text-xs text-gray-500">root: {probeResult.dataPath}</span>}
-            </div>
-
-            {probeResult.sampleKeys && (
-              <div>
-                <div className="text-xs text-gray-500 mb-1">Dálkar ({probeResult.sampleKeys.length})</div>
-                <div className="flex flex-wrap gap-1">
-                  {probeResult.sampleKeys.map((k) => (
-                    <span key={k} className="text-xs px-2 py-0.5 rounded bg-gray-700 text-gray-300">{k}</span>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {probeResult.sample && (
-              <div className="overflow-x-auto">
-                <div className="text-xs text-gray-500 mb-1">Sýnishorn</div>
-                <pre className="text-xs text-gray-400 bg-gray-900/60 rounded-lg p-3 max-h-48 overflow-y-auto">
-                  {JSON.stringify(Array.isArray(probeResult.sample) ? probeResult.sample : probeResult.sample, null, 2)}
-                </pre>
-              </div>
-            )}
-
-            {/* Import controls */}
-            <div className="flex items-end gap-2 pt-2 border-t border-gray-700/50">
-              <div>
-                <label className="text-xs text-gray-500">Schema</label>
-                <input
-                  type="text" value={importTarget.schema}
-                  onChange={(e) => setImportTarget(t => ({ ...t, schema: e.target.value }))}
-                  className="block w-32 bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500">Tafla</label>
-                <input
-                  type="text" value={importTarget.table}
-                  onChange={(e) => setImportTarget(t => ({ ...t, table: e.target.value }))}
-                  className="block w-48 bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                />
-              </div>
-              <button
-                onClick={importData}
-                disabled={importing || !importTarget.schema || !importTarget.table}
-                className="px-4 py-2 rounded-lg text-sm font-medium bg-emerald-600/20 border border-emerald-500/40 text-emerald-400 hover:bg-emerald-600/30 transition-colors disabled:opacity-40"
-              >
-                {importing ? 'Flyt inn...' : 'Flytja inn'}
-              </button>
-            </div>
-          </div>
-        )}
-        {probeResult?.error && (
-          <div className="mt-3 text-sm text-red-400">{probeResult.error}</div>
         )}
       </div>
     </div>
