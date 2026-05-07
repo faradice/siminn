@@ -4,6 +4,7 @@ import OverviewPage from './OverviewPage';
 import SourcesPage from './SourcesPage';
 import DatabasePage from './DatabasePage';
 import SourceDashboardPage from './SourceDashboardPage';
+import SettingsPage from './SettingsPage';
 
 export default function App() {
   const [page, setPage] = useState('overview');
@@ -28,6 +29,7 @@ export default function App() {
       {page === 'sources' && <SourcesPage onNavigate={navigate} />}
       {page === 'database' && <DatabasePage initialSchema={dbSchema} />}
       {page === 'source-dashboard' && <SourceDashboardPage sourceName={sourceName} onBack={() => navigate('overview')} />}
+      {page === 'settings' && <SettingsPage />}
     </Layout>
   );
 }

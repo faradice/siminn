@@ -1,7 +1,7 @@
 const { Pool } = require('pg');
 require('dotenv').config();
 
-const pool = new Pool({
+let pool = new Pool({
   host: process.env.PG_HOST || 'localhost',
   port: parseInt(process.env.PG_PORT || '5432'),
   database: process.env.PG_DATABASE || 'simipipe',
@@ -12,6 +12,22 @@ const pool = new Pool({
 pool.on('error', (err) => {
   console.error('[DB] Unexpected error:', err.message);
 });
+
+async function reconnect(config) {
+  await pool.end();
+  pool = new Pool({
+    host: config.host || 'localhost',
+    port: parseInt(config.port || '5432'),
+    database: config.database || 'simipipe',
+    user: config.user || undefined,
+    password: config.password || undefined,
+  });
+  pool.on('error', (err) => {
+    console.error('[DB] Unexpected error:', err.message);
+  });
+  // Verify connection
+  await pool.query('SELECT 1');
+}
 
 // Infer PostgreSQL column type from JS values
 function inferType(values) {
@@ -141,4 +157,9 @@ async function incrementalLoad(schema, table, rows, keyColumn) {
   return upserted;
 }
 
-module.exports = { pool, fullLoad, incrementalLoad };
+module.exports = {
+  get pool() { return pool; },
+  fullLoad,
+  incrementalLoad,
+  reconnect,
+};

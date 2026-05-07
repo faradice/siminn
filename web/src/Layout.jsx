@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { LayoutDashboard, Plug, Database, ChevronLeft, ChevronRight } from 'lucide-react';
+import { LayoutDashboard, Plug, Database, Settings, ChevronLeft, ChevronRight } from 'lucide-react';
 
 const NAV = [
   { key: 'overview', label: 'Yfirlit', icon: LayoutDashboard },
@@ -44,6 +44,21 @@ export default function Layout({ page, onNavigate, sourceName, children }) {
             </button>
           ))}
         </nav>
+
+        {/* Settings (bottom) */}
+        <div className="px-2 pb-2">
+          <button
+            onClick={() => onNavigate('settings')}
+            title={expanded ? undefined : 'Stillingar'}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${page === 'settings'
+              ? 'bg-blue-600 text-white'
+              : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
+            }`}
+          >
+            <Settings className="w-5 h-5 flex-shrink-0" />
+            {expanded && <span>Stillingar</span>}
+          </button>
+        </div>
 
         {/* Collapse toggle */}
         <button

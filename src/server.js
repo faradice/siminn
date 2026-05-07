@@ -2,8 +2,10 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
-const { pool, fullLoad } = require('./db');
+const db = require('./db');
+const { fullLoad, reconnect } = db;
 const axios = require('axios');
+const fs = require('fs');
 
 const path = require('path');
 
@@ -24,8 +26,8 @@ const SOURCE_RUNNERS = {
 
 // ── Ensure simipipe tables exist ──
 async function ensureMetaTables() {
-  await pool.query(`CREATE SCHEMA IF NOT EXISTS simipipe`);
-  await pool.query(`
+  await db.pool.query(`CREATE SCHEMA IF NOT EXISTS simipipe`);
+  await db.pool.query(`
     CREATE TABLE IF NOT EXISTS simipipe.source (
       name TEXT PRIMARY KEY,
       source_type TEXT,
@@ -37,7 +39,7 @@ async function ensureMetaTables() {
       last_rows INTEGER
     )
   `);
-  await pool.query(`
+  await db.pool.query(`
     CREATE TABLE IF NOT EXISTS simipipe.run_history (
       id SERIAL PRIMARY KEY,
       source_name TEXT NOT NULL,
@@ -49,7 +51,7 @@ async function ensureMetaTables() {
     )
   `);
   // Add schedule column if missing (migration)
-  await pool.query(`
+  await db.pool.query(`
     ALTER TABLE simipipe.source ADD COLUMN IF NOT EXISTS schedule TEXT
   `).catch(() => {});
 }
@@ -71,26 +73,26 @@ async function runSourceByName(name) {
       ? Object.values(result).reduce((s, v) => s + (typeof v === 'number' ? v : 0), 0)
       : 0;
 
-    await pool.query(`
+    await db.pool.query(`
       INSERT INTO simipipe.source (name, source_type, last_run, last_status, last_rows)
       VALUES ($1, 'built-in', NOW(), 'success', $2)
       ON CONFLICT (name) DO UPDATE SET last_run = NOW(), last_status = 'success', last_rows = $2
     `, [name, totalRows]);
 
-    await pool.query(`
+    await db.pool.query(`
       INSERT INTO simipipe.run_history (source_name, started_at, finished_at, status, rows)
       VALUES ($1, $2, NOW(), 'success', $3)
     `, [name, startedAt, totalRows]);
 
     return result;
   } catch (err) {
-    await pool.query(`
+    await db.pool.query(`
       INSERT INTO simipipe.source (name, source_type, last_run, last_status, last_rows)
       VALUES ($1, 'built-in', NOW(), 'error', 0)
       ON CONFLICT (name) DO UPDATE SET last_run = NOW(), last_status = 'error'
     `, [name]);
 
-    await pool.query(`
+    await db.pool.query(`
       INSERT INTO simipipe.run_history (source_name, started_at, finished_at, status, error)
       VALUES ($1, $2, NOW(), 'error', $3)
     `, [name, startedAt, err.message]);
@@ -104,7 +106,7 @@ const scheduledJobs = {};
 
 async function initScheduler() {
   try {
-    const res = await pool.query(`SELECT name, schedule FROM simipipe.source WHERE schedule IS NOT NULL`);
+    const res = await db.pool.query(`SELECT name, schedule FROM simipipe.source WHERE schedule IS NOT NULL`);
     for (const row of res.rows) {
       scheduleSource(row.name, row.schedule);
     }
@@ -132,7 +134,7 @@ function scheduleSource(name, cronExpr) {
 // ── API: List schemas and tables ──
 app.get('/api/tables', async (req, res) => {
   try {
-    const result = await pool.query(`
+    const result = await db.pool.query(`
       SELECT table_schema, table_name,
              (SELECT reltuples::bigint FROM pg_class c
               JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -159,9 +161,9 @@ app.get('/api/tables/:schema/:table', async (req, res) => {
   const offset = parseInt(req.query.offset) || 0;
   try {
     const [data, count, columns] = await Promise.all([
-      pool.query(`SELECT * FROM "${schema}"."${table}" LIMIT $1 OFFSET $2`, [limit, offset]),
-      pool.query(`SELECT COUNT(*) as total FROM "${schema}"."${table}"`),
-      pool.query(`
+      db.pool.query(`SELECT * FROM "${schema}"."${table}" LIMIT $1 OFFSET $2`, [limit, offset]),
+      db.pool.query(`SELECT COUNT(*) as total FROM "${schema}"."${table}"`),
+      db.pool.query(`
         SELECT column_name, data_type
         FROM information_schema.columns
         WHERE table_schema = $1 AND table_name = $2
@@ -183,12 +185,12 @@ app.get('/api/tables/:schema/:table', async (req, res) => {
 // ── API: List configured sources ──
 app.get('/api/sources', async (req, res) => {
   try {
-    const exists = await pool.query(
+    const exists = await db.pool.query(
       `SELECT 1 FROM information_schema.tables WHERE table_schema = 'simipipe' AND table_name = 'source'`
     );
     let saved = [];
     if (exists.rows.length > 0) {
-      const result = await pool.query(`SELECT * FROM simipipe.source ORDER BY name`);
+      const result = await db.pool.query(`SELECT * FROM simipipe.source ORDER BY name`);
       saved = result.rows;
     }
     const sources = Object.keys(SOURCE_RUNNERS).map((name) => {
@@ -239,7 +241,7 @@ app.put('/api/sources/:name/schedule', async (req, res) => {
     return res.status(400).json({ error: `Invalid cron: "${schedule}"` });
   }
   try {
-    await pool.query(`
+    await db.pool.query(`
       INSERT INTO simipipe.source (name, source_type, schedule)
       VALUES ($1, 'built-in', $2)
       ON CONFLICT (name) DO UPDATE SET schedule = $2
@@ -333,7 +335,7 @@ app.post('/api/import', async (req, res) => {
 app.get('/api/overview', async (req, res) => {
   try {
     const [tables, sources, diskResult, healthResult, historyResult] = await Promise.all([
-      pool.query(`
+      db.pool.query(`
         SELECT t.table_schema, t.table_name,
                COALESCE((SELECT reltuples::bigint FROM pg_class c
                 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -342,10 +344,10 @@ app.get('/api/overview', async (req, res) => {
         WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema')
         ORDER BY t.table_schema, t.table_name
       `),
-      pool.query(`SELECT * FROM simipipe.source ORDER BY name`).catch(() => ({ rows: [] })),
-      pool.query(`SELECT pg_database_size(current_database()) as size`).catch(() => ({ rows: [{ size: null }] })),
-      pool.query(`SELECT current_database(), current_user`).catch(() => ({ rows: [{}] })),
-      pool.query(`
+      db.pool.query(`SELECT * FROM simipipe.source ORDER BY name`).catch(() => ({ rows: [] })),
+      db.pool.query(`SELECT pg_database_size(current_database()) as size`).catch(() => ({ rows: [{ size: null }] })),
+      db.pool.query(`SELECT current_database(), current_user`).catch(() => ({ rows: [{}] })),
+      db.pool.query(`
         SELECT source_name, status, rows, finished_at
         FROM simipipe.run_history
         ORDER BY finished_at DESC
@@ -400,11 +402,11 @@ app.get('/api/sources/:name/dashboard', async (req, res) => {
   const { name } = req.params;
   try {
     // Source metadata
-    const sourceRes = await pool.query(`SELECT * FROM simipipe.source WHERE name = $1`, [name]);
+    const sourceRes = await db.pool.query(`SELECT * FROM simipipe.source WHERE name = $1`, [name]);
     const source = sourceRes.rows[0] || { name, source_type: 'built-in' };
 
     // Run history (last 30)
-    const historyRes = await pool.query(`
+    const historyRes = await db.pool.query(`
       SELECT started_at, finished_at, status, rows, error
       FROM simipipe.run_history
       WHERE source_name = $1
@@ -412,7 +414,7 @@ app.get('/api/sources/:name/dashboard', async (req, res) => {
     `, [name]);
 
     // Tables in this source's schema
-    const tablesRes = await pool.query(`
+    const tablesRes = await db.pool.query(`
       SELECT table_name
       FROM information_schema.tables
       WHERE table_schema = $1
@@ -422,14 +424,14 @@ app.get('/api/sources/:name/dashboard', async (req, res) => {
     // Get exact row counts per table
     const tables = [];
     for (const t of tablesRes.rows) {
-      const countRes = await pool.query(`SELECT COUNT(*) as cnt FROM "${name}"."${t.table_name}"`);
+      const countRes = await db.pool.query(`SELECT COUNT(*) as cnt FROM "${name}"."${t.table_name}"`);
       tables.push({ table: t.table_name, rows: parseInt(countRes.rows[0].cnt) });
     }
 
     // Column analysis per table
     const tableDetails = {};
     for (const t of tables) {
-      const colsRes = await pool.query(`
+      const colsRes = await db.pool.query(`
         SELECT column_name, data_type
         FROM information_schema.columns
         WHERE table_schema = $1 AND table_name = $2
@@ -443,7 +445,7 @@ app.get('/api/sources/:name/dashboard', async (req, res) => {
         if (['integer', 'bigint', 'numeric', 'double precision', 'real', 'smallint'].includes(col.data_type)) {
           // Numeric: stats + histogram
           try {
-            const statsRes = await pool.query(`
+            const statsRes = await db.pool.query(`
               SELECT MIN("${col.column_name}")::float as min_val,
                      MAX("${col.column_name}")::float as max_val,
                      AVG("${col.column_name}")::float as avg_val,
@@ -453,7 +455,7 @@ app.get('/api/sources/:name/dashboard', async (req, res) => {
             `);
             const stats = statsRes.rows[0];
             if (stats.min_val != null && stats.max_val != null && stats.min_val !== stats.max_val) {
-              const histRes = await pool.query(`
+              const histRes = await db.pool.query(`
                 SELECT width_bucket("${col.column_name}"::float, $1::float, $2::float + 0.001, 10) as bucket,
                        COUNT(*) as cnt
                 FROM "${name}"."${t.table}"
@@ -474,14 +476,14 @@ app.get('/api/sources/:name/dashboard', async (req, res) => {
         } else if (['timestamp without time zone', 'timestamp with time zone', 'date'].includes(col.data_type)) {
           // Timestamp: range + weekly time series
           try {
-            const tsRes = await pool.query(`
+            const tsRes = await db.pool.query(`
               SELECT MIN("${col.column_name}") as min_ts, MAX("${col.column_name}") as max_ts,
                      COUNT(*) as total
               FROM "${name}"."${t.table}"
               WHERE "${col.column_name}" IS NOT NULL
             `);
             if (tsRes.rows[0].total > 0) {
-              const seriesRes = await pool.query(`
+              const seriesRes = await db.pool.query(`
                 SELECT date_trunc('week', "${col.column_name}") as week, COUNT(*) as cnt
                 FROM "${name}"."${t.table}"
                 WHERE "${col.column_name}" IS NOT NULL
@@ -497,14 +499,14 @@ app.get('/api/sources/:name/dashboard', async (req, res) => {
         } else if (['character varying', 'text', 'character'].includes(col.data_type)) {
           // Text: check cardinality
           try {
-            const cardRes = await pool.query(`
+            const cardRes = await db.pool.query(`
               SELECT COUNT(DISTINCT "${col.column_name}") as distinct_count
               FROM "${name}"."${t.table}"
               WHERE "${col.column_name}" IS NOT NULL
             `);
             const distinct = parseInt(cardRes.rows[0].distinct_count);
             if (distinct > 0 && distinct <= 20) {
-              const valRes = await pool.query(`
+              const valRes = await db.pool.query(`
                 SELECT "${col.column_name}" as val, COUNT(*) as cnt
                 FROM "${name}"."${t.table}"
                 WHERE "${col.column_name}" IS NOT NULL
@@ -540,10 +542,103 @@ app.get('/api/sources/:name/dashboard', async (req, res) => {
 // ── API: DB connection test ──
 app.get('/api/health', async (req, res) => {
   try {
-    const r = await pool.query('SELECT current_database(), current_user');
+    const r = await db.pool.query('SELECT current_database(), current_user');
     res.json({ data: { ...r.rows[0], status: 'ok' } });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── API: Settings ──
+const ENV_PATH = path.join(__dirname, '../.env');
+
+function readEnvFile() {
+  try { return fs.readFileSync(ENV_PATH, 'utf8'); } catch { return ''; }
+}
+
+function parseEnvFile(content) {
+  const vars = {};
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq < 0) continue;
+    vars[trimmed.slice(0, eq)] = trimmed.slice(eq + 1);
+  }
+  return vars;
+}
+
+app.get('/api/settings', async (req, res) => {
+  const vars = parseEnvFile(readEnvFile());
+  let connUser = '';
+  try {
+    const r = await db.pool.query('SELECT current_user, current_database()');
+    connUser = r.rows[0].current_user;
+  } catch {}
+  const hasPw = !!(vars.PG_PASSWORD || process.env.PG_PASSWORD);
+  res.json({
+    data: {
+      database: {
+        host: vars.PG_HOST || process.env.PG_HOST || 'localhost',
+        port: vars.PG_PORT || process.env.PG_PORT || '5432',
+        database: vars.PG_DATABASE || process.env.PG_DATABASE || 'simipipe',
+        user: vars.PG_USER || process.env.PG_USER || connUser,
+        password: hasPw ? '••••' : '',
+      },
+    },
+  });
+});
+
+app.put('/api/settings', async (req, res) => {
+  const { database: db } = req.body;
+  if (!db) return res.status(400).json({ error: 'database config required' });
+  try {
+    // Read existing .env, preserve non-PG lines
+    const content = readEnvFile();
+    const lines = content.split('\n');
+    const kept = lines.filter(l => {
+      const t = l.trim();
+      return !t.startsWith('PG_HOST=') && !t.startsWith('PG_PORT=') &&
+             !t.startsWith('PG_DATABASE=') && !t.startsWith('PG_USER=') && !t.startsWith('PG_PASSWORD=');
+    });
+    // Find insertion point (after # Local PostgreSQL header, or at top)
+    let insertIdx = kept.findIndex(l => l.trim() === '# Local PostgreSQL');
+    if (insertIdx >= 0) insertIdx += 1;
+    else insertIdx = 0;
+    const pgLines = [`PG_HOST=${db.host || 'localhost'}`, `PG_PORT=${db.port || '5432'}`, `PG_DATABASE=${db.database || 'simipipe'}`];
+    if (db.user) pgLines.push(`PG_USER=${db.user}`);
+    if (db.password && db.password !== '••••') pgLines.push(`PG_PASSWORD=${db.password}`);
+    kept.splice(insertIdx, 0, ...pgLines);
+    fs.writeFileSync(ENV_PATH, kept.join('\n'));
+    // Reconnect pool
+    const newConfig = { host: db.host, port: db.port, database: db.database, user: db.user || undefined };
+    if (db.password && db.password !== '••••') newConfig.password = db.password;
+    else {
+      const vars = parseEnvFile(content);
+      if (vars.PG_PASSWORD) newConfig.password = vars.PG_PASSWORD;
+    }
+    await reconnect(newConfig);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/settings/test', async (req, res) => {
+  const { host, port, database, user, password } = req.body;
+  const { Pool: TempPool } = require('pg');
+  const tmp = new TempPool({
+    host: host || 'localhost', port: parseInt(port || '5432'),
+    database: database || 'simipipe', user: user || undefined, password: password || undefined,
+    connectionTimeoutMillis: 5000,
+  });
+  try {
+    const r = await tmp.query('SELECT version()');
+    await tmp.end();
+    res.json({ ok: true, version: r.rows[0].version });
+  } catch (err) {
+    try { await tmp.end(); } catch {}
+    res.json({ ok: false, error: err.message });
   }
 });
 
