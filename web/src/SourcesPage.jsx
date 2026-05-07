@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useFetch, API } from './shared';
-import { Clock, Calendar, ChevronDown, ChevronUp, Search, Pencil, Plus, KeyRound } from 'lucide-react';
+import { Clock, Calendar, ChevronDown, ChevronUp, ChevronRight, Search, Pencil, Plus, KeyRound } from 'lucide-react';
 
 const SCHEDULE_PRESETS = [
   { label: 'Á hverri klukkustund', value: '0 * * * *' },
@@ -17,6 +17,9 @@ export default function SourcesPage({ onNavigate }) {
   const [editSchedule, setEditSchedule] = useState(null);
   const [expanded, setExpanded] = useState(null); // source name with open probe panel
   const [probeState, setProbeState] = useState({ url: '', urls: [], result: null, probing: false, importing: false, schema: '', table: '' });
+  const [showNew, setShowNew] = useState(false);
+  const [newSource, setNewSource] = useState({ name: '', url: '', showOAuth: false, oauth2: { tokenUrl: '', clientId: '', clientSecret: '', username: '', password: '' } });
+  const [savingNew, setSavingNew] = useState(false);
 
   const runSource = async (name) => {
     setRunning(name);
@@ -104,19 +107,31 @@ export default function SourcesPage({ onNavigate }) {
     setProbeState(s => ({ ...s, importing: false }));
   };
 
+  const saveNewSource = async () => {
+    const name = newSource.name.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+    if (!name || !newSource.url.trim()) return;
+    setSavingNew(true);
+    try {
+      const secret = { name, urls: [newSource.url.trim()] };
+      if (newSource.oauth2.tokenUrl.trim()) secret.oauth2 = newSource.oauth2;
+      await fetch(`${API}/secrets/${name}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(secret),
+      });
+      setNewSource({ name: '', url: '', showOAuth: false, oauth2: { tokenUrl: '', clientId: '', clientSecret: '', username: '', password: '' } });
+      setShowNew(false);
+      refetch();
+    } catch {}
+    setSavingNew(false);
+  };
+
+  const inputCls = 'bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500';
+
   return (
     <div className="space-y-6">
       <div className="bg-gray-800/60 rounded-xl p-6 border border-gray-700/50">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h2 className="text-lg font-semibold text-white mb-1">Uppsprettur</h2>
-            <p className="text-sm text-gray-500">Allar gagnalindir — smelltu á „Keyra" til að sækja gögn</p>
-          </div>
-          <button onClick={() => onNavigate('settings')}
-            className="px-3 py-1.5 text-xs rounded-lg border border-gray-600 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-colors flex items-center gap-1.5">
-            <Plus className="w-3.5 h-3.5" /> Bæta við
-          </button>
-        </div>
+        <h2 className="text-lg font-semibold text-white mb-1">Uppsprettur</h2>
+        <p className="text-sm text-gray-500 mb-4">Allar gagnalindir — smelltu á „Keyra" til að sækja gögn</p>
 
         {loading ? (
           <div className="text-gray-500 text-sm">Hleð...</div>
@@ -277,6 +292,47 @@ export default function SourcesPage({ onNavigate }) {
                 )}
               </div>
             ))}
+          </div>
+        )}
+      </div>
+
+      {/* Ný uppspretta */}
+      <div className="bg-gray-800/60 rounded-xl border border-gray-700/50">
+        <button onClick={() => setShowNew(!showNew)} className="w-full flex items-center gap-2 p-4 text-sm text-gray-400 hover:text-gray-200 transition-colors">
+          {showNew ? <ChevronDown className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+          <span className="font-medium">Ný uppspretta</span>
+        </button>
+        {showNew && (
+          <div className="px-6 pb-6 space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <input value={newSource.name} onChange={e => setNewSource(s => ({ ...s, name: e.target.value }))}
+                placeholder="Heiti (t.d. creditinfo)" className={inputCls} />
+              <input value={newSource.url} onChange={e => setNewSource(s => ({ ...s, url: e.target.value }))}
+                placeholder="https://api.example.com/data" className={inputCls} />
+            </div>
+            <button onClick={() => setNewSource(s => ({ ...s, showOAuth: !s.showOAuth }))}
+              className="flex items-center gap-2 text-xs text-gray-400 hover:text-gray-200 transition-colors">
+              {newSource.showOAuth ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+              <KeyRound className="w-3.5 h-3.5" /> OAuth2
+            </button>
+            {newSource.showOAuth && (
+              <div className="grid grid-cols-2 gap-2 p-3 bg-gray-900/40 rounded-lg border border-gray-700/30">
+                <input value={newSource.oauth2.tokenUrl} onChange={e => setNewSource(s => ({ ...s, oauth2: { ...s.oauth2, tokenUrl: e.target.value } }))}
+                  placeholder="Token URL" className={inputCls + ' col-span-2'} />
+                <input value={newSource.oauth2.clientId} onChange={e => setNewSource(s => ({ ...s, oauth2: { ...s.oauth2, clientId: e.target.value } }))}
+                  placeholder="Client ID" className={inputCls} />
+                <input value={newSource.oauth2.clientSecret} onChange={e => setNewSource(s => ({ ...s, oauth2: { ...s.oauth2, clientSecret: e.target.value } }))}
+                  placeholder="Client Secret" type="password" className={inputCls} />
+                <input value={newSource.oauth2.username} onChange={e => setNewSource(s => ({ ...s, oauth2: { ...s.oauth2, username: e.target.value } }))}
+                  placeholder="Username" className={inputCls} />
+                <input value={newSource.oauth2.password} onChange={e => setNewSource(s => ({ ...s, oauth2: { ...s.oauth2, password: e.target.value } }))}
+                  placeholder="Password" type="password" className={inputCls} />
+              </div>
+            )}
+            <button onClick={saveNewSource} disabled={savingNew || !newSource.name.trim() || !newSource.url.trim()}
+              className="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-500 transition-colors disabled:opacity-40">
+              {savingNew ? 'Vista...' : 'Vista uppsprettu'}
+            </button>
           </div>
         )}
       </div>

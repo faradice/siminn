@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { LayoutDashboard, Plug, Database, Settings, ChevronLeft, ChevronRight } from 'lucide-react';
+import { LayoutDashboard, Plug, Database, Settings, ChevronLeft, ChevronRight, ArrowLeft } from 'lucide-react';
 
 const NAV = [
   { key: 'overview', label: 'Yfirlit', icon: LayoutDashboard },
@@ -7,7 +7,7 @@ const NAV = [
   { key: 'database', label: 'Gagnagrunnur', icon: Database },
 ];
 
-export default function Layout({ page, onNavigate, sourceName, children }) {
+export default function Layout({ page, onNavigate, sourceName, onBack, children }) {
   const [expanded, setExpanded] = useState(true);
 
   return (
@@ -72,12 +72,10 @@ export default function Layout({ page, onNavigate, sourceName, children }) {
       {/* Content */}
       <main className="flex-1 overflow-y-auto p-6">
         <div className="max-w-7xl mx-auto">
-          {page === 'source-dashboard' && sourceName && (
-            <div className="flex items-center gap-2 text-sm text-gray-500 mb-4">
-              <button onClick={() => onNavigate('overview')} className="hover:text-white transition-colors">Yfirlit</button>
-              <span>/</span>
-              <span className="text-white">{sourceName}</span>
-            </div>
+          {onBack && (
+            <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-white transition-colors mb-4">
+              <ArrowLeft className="w-4 h-4" /> Til baka
+            </button>
           )}
           {children}
         </div>
