@@ -170,7 +170,7 @@ export default function SourcesPage({ onNavigate }) {
                       ))}
                     </div>
                   ) : (
-                    <button onClick={() => setEditSchedule(s.name)} className="p-1.5 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-700/50 transition-colors" title="Tímasetja">
+                    <button onClick={() => setEditSchedule(s.name)} className="p-1.5 rounded-lg bg-gray-700/50 border border-gray-600/50 text-gray-300 hover:text-white hover:bg-gray-600/50 transition-colors" title="Tímasetja">
                       <Clock className="w-4 h-4" />
                     </button>
                   )}
@@ -182,9 +182,9 @@ export default function SourcesPage({ onNavigate }) {
                   </span>
 
                   {/* Actions */}
-                  {(s.type !== 'built-in' || s.urls?.length > 0) && (
+                  {s.type !== 'built-in' && (
                     <button onClick={() => toggleProbe(s.name)} title="Skoða API"
-                      className={`p-1.5 rounded-lg transition-colors ${expanded === s.name ? 'bg-blue-600/20 text-blue-400' : 'text-gray-500 hover:text-gray-300 hover:bg-gray-700/50'}`}>
+                      className={`p-1.5 rounded-lg transition-colors ${expanded === s.name ? 'bg-blue-600/20 text-blue-400' : 'bg-gray-700/50 border border-gray-600/50 text-gray-300 hover:text-white hover:bg-gray-600/50'}`}>
                       {expanded === s.name ? <ChevronUp className="w-4 h-4" /> : <Search className="w-4 h-4" />}
                     </button>
                   )}
