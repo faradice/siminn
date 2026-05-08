@@ -175,11 +175,13 @@ export default function SourcesPage({ onNavigate }) {
                     </button>
                   )}
 
-                  {s.lastRows != null && <span className="text-xs text-gray-500">{s.lastRows.toLocaleString()} raðir</span>}
+                  {s.lastRows > 0 && <span className="text-xs text-gray-500">{s.lastRows.toLocaleString()} raðir</span>}
 
-                  <span className={`text-xs px-2 py-0.5 rounded ${s.lastStatus === 'success' ? 'bg-green-500/20 text-green-400' : s.lastStatus ? 'bg-red-500/20 text-red-400' : 'bg-gray-700 text-gray-400'}`}>
-                    {s.lastStatus || '—'}
-                  </span>
+                  {s.lastStatus && (
+                    <span className={`text-xs px-2 py-0.5 rounded ${s.lastStatus === 'success' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
+                      {s.lastStatus}
+                    </span>
+                  )}
 
                   {/* Actions */}
                   {s.type !== 'built-in' && (
