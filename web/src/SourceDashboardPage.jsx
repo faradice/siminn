@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useFetch } from './shared';
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from 'recharts';
-import { ChevronDown, ChevronRight, ArrowLeft } from 'lucide-react';
+import { ChevronDown, ChevronRight, ArrowLeft, Calendar } from 'lucide-react';
 
 const COLORS = ['#60a5fa', '#34d399', '#a78bfa', '#fbbf24', '#f87171', '#2dd4bf', '#f472b6', '#fb923c'];
 const TOOLTIP_STYLE = { contentStyle: { background: '#1f2937', border: '1px solid #374151', borderRadius: 8 }, itemStyle: { color: '#d1d5db' }, labelStyle: { color: '#9ca3af' } };
@@ -252,12 +252,15 @@ function HeroBanner({ history, tables, source, insights }) {
               <div className="flex items-center justify-between mt-2.5 text-xs text-gray-400">
                 <span className="flex items-center gap-1.5">
                   <span className="w-2.5 h-2.5 rounded-full bg-green-500 inline-block" /> Stuðningsmenn {pPct}%
+                  <span className="text-gray-600">({npsInsight.promoters})</span>
                 </span>
                 <span className="flex items-center gap-1.5">
                   <span className="w-2.5 h-2.5 rounded-full bg-yellow-500 inline-block" /> Hlutlausir {paPct}%
+                  <span className="text-gray-600">({npsInsight.passives})</span>
                 </span>
                 <span className="flex items-center gap-1.5">
                   <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block" /> Gagnrýnendur {dPct}%
+                  <span className="text-gray-600">({npsInsight.detractors})</span>
                 </span>
               </div>
             </div>
@@ -489,13 +492,23 @@ function TableCard({ name, rows, columns }) {
 
 export default function SourceDashboardPage({ sourceName, onBack }) {
   const [selectedSurvey, setSelectedSurvey] = useState(null);
-  const surveyParam = selectedSurvey ? `?survey=${selectedSurvey}` : '';
-  const { data, loading } = useFetch(`/sources/${sourceName}/dashboard${surveyParam}`);
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+
+  const params = new URLSearchParams();
+  if (selectedSurvey) params.set('survey', selectedSurvey);
+  if (dateFrom) params.set('dateFrom', dateFrom);
+  if (dateTo) params.set('dateTo', dateTo);
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  const { data, loading } = useFetch(`/sources/${sourceName}/dashboard${qs}`);
 
   if (loading) return <div className="text-gray-500 text-sm p-6">Hleð mælaborði...</div>;
   if (!data) return <div className="text-red-400 text-sm p-6">Gat ekki hlaðið mælaborði</div>;
 
-  const { source, history, tables, tableDetails, insights, surveys } = data;
+  const { source, history, tables, tableDetails, insights, surveys, responseStats } = data;
+  const hasFilters = surveys || responseStats;
+  const npsInsight = insights?.find(i => i.type === 'nps');
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -507,35 +520,79 @@ export default function SourceDashboardPage({ sourceName, onBack }) {
         <span className="text-xs px-2 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/20">{source.type}</span>
       </div>
 
-      {/* Survey picker */}
-      {surveys && surveys.length > 0 && (
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-gray-500 uppercase tracking-wider font-medium">Könnun</span>
-          <div className="flex gap-1.5 flex-wrap">
-            <button
-              onClick={() => setSelectedSurvey(null)}
-              className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${
-                !selectedSurvey
-                  ? 'bg-blue-500/20 text-blue-300 border-blue-500/40'
-                  : 'bg-gray-800/60 text-gray-400 border-gray-700/50 hover:bg-gray-700/50 hover:text-gray-300'
-              }`}
-            >
-              Allar kannanir
-            </button>
-            {surveys.map(s => (
-              <button
-                key={s.id}
-                onClick={() => setSelectedSurvey(s.id)}
-                className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${
-                  selectedSurvey === s.id
-                    ? 'bg-blue-500/20 text-blue-300 border-blue-500/40'
-                    : 'bg-gray-800/60 text-gray-400 border-gray-700/50 hover:bg-gray-700/50 hover:text-gray-300'
-                }`}
-              >
-                {s.title}
-              </button>
-            ))}
-          </div>
+      {/* Filters bar */}
+      {hasFilters && (
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+          {/* Survey picker */}
+          {surveys && surveys.length > 0 && (
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-gray-500 uppercase tracking-wider font-medium">Könnun</span>
+              <div className="flex gap-1.5 flex-wrap">
+                <button
+                  onClick={() => setSelectedSurvey(null)}
+                  className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${
+                    !selectedSurvey
+                      ? 'bg-blue-500/20 text-blue-300 border-blue-500/40'
+                      : 'bg-gray-800/60 text-gray-400 border-gray-700/50 hover:bg-gray-700/50 hover:text-gray-300'
+                  }`}
+                >
+                  Allar kannanir
+                </button>
+                {surveys.map(s => (
+                  <button
+                    key={s.id}
+                    onClick={() => setSelectedSurvey(s.id)}
+                    className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${
+                      selectedSurvey === s.id
+                        ? 'bg-blue-500/20 text-blue-300 border-blue-500/40'
+                        : 'bg-gray-800/60 text-gray-400 border-gray-700/50 hover:bg-gray-700/50 hover:text-gray-300'
+                    }`}
+                  >
+                    {s.title}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Date filter */}
+          {responseStats && (
+            <div className="flex items-center gap-2">
+              <Calendar className="w-3.5 h-3.5 text-gray-500" />
+              <input type="date" value={dateFrom}
+                onChange={e => setDateFrom(e.target.value)}
+                className="bg-gray-800/60 border border-gray-700/50 rounded-lg text-xs text-gray-300 px-2.5 py-1.5 focus:outline-none focus:border-blue-500/50"
+                placeholder="Frá"
+              />
+              <span className="text-gray-600 text-xs">&ndash;</span>
+              <input type="date" value={dateTo}
+                onChange={e => setDateTo(e.target.value)}
+                className="bg-gray-800/60 border border-gray-700/50 rounded-lg text-xs text-gray-300 px-2.5 py-1.5 focus:outline-none focus:border-blue-500/50"
+                placeholder="Til"
+              />
+              {(dateFrom || dateTo) && (
+                <button onClick={() => { setDateFrom(''); setDateTo(''); }}
+                  className="text-[10px] text-gray-500 hover:text-gray-300 px-1.5 py-0.5 rounded border border-gray-700/30 hover:border-gray-600/50">
+                  Hreinsa
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Response stats */}
+          {responseStats && (
+            <div className="ml-auto flex items-center gap-3 text-[11px] text-gray-500">
+              <span>{responseStats.total.toLocaleString('is-IS')} svör (lokið)</span>
+              {npsInsight && npsInsight.total !== responseStats.total && (
+                <span>{npsInsight.total.toLocaleString('is-IS')} NPS svör</span>
+              )}
+              {responseStats.earliest && (
+                <span title={`${new Date(responseStats.earliest).toLocaleDateString('is-IS')} – ${new Date(responseStats.latest).toLocaleDateString('is-IS')}`}>
+                  {new Date(responseStats.earliest).toLocaleDateString('is-IS', { month: 'short', year: 'numeric' })} – {new Date(responseStats.latest).toLocaleDateString('is-IS', { month: 'short', year: 'numeric' })}
+                </span>
+              )}
+            </div>
+          )}
         </div>
       )}
 
