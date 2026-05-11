@@ -17,10 +17,10 @@ function timeAgo(date) {
   return `${Math.floor(s / 86400)} dögum síðan`;
 }
 
-function HeroBanner({ history, tables, source }) {
+function HeroBanner({ history, tables, source, insights }) {
   const [animated, setAnimated] = useState(false);
   const countRef = useRef(null);
-  const rateRef = useRef(null);
+  const scoreRef = useRef(null);
 
   const totalRows = tables.reduce((s, t) => s + t.rows, 0);
   const lastRunRows = history.length > 0 ? (history[history.length - 1].rows || 0) : 0;
@@ -28,7 +28,7 @@ function HeroBanner({ history, tables, source }) {
   const rowDelta = lastRunRows - prevRunRows;
   const lastSuccess = [...history].reverse().find(h => h.status === 'success');
 
-  // Freshness score: 100 when just ran, 0 when 2x overdue vs avg interval
+  // Freshness score
   const successes = history.filter(h => h.status === 'success');
   let expectedMs = 24 * 60 * 60 * 1000;
   if (successes.length >= 2) {
@@ -40,10 +40,23 @@ function HeroBanner({ history, tables, source }) {
     ? Date.now() - Math.max(...successes.map(h => new Date(h.started_at).getTime()))
     : expectedMs * 2;
   const freshness = Math.max(0, Math.min(100, 100 * (1 - elapsed / (expectedMs * 2))));
+  const freshnessColor = freshness >= 90 ? '#22c55e' : freshness >= 70 ? '#84cc16' : freshness >= 50 ? '#eab308' : '#ef4444';
 
+  const npsInsight = insights?.find(i => i.type === 'nps');
+  const ratingInsight = insights?.find(i => i.type === 'rating');
+  const hasNps = !!npsInsight;
+
+  // Gauge is NPS when available, freshness otherwise
   const cx = 140, cy = 130, r = 100;
-  const normalizedScore = freshness / 100;
   const totalArcLen = Math.PI * r;
+  const normalizedScore = hasNps ? (npsInsight.score + 100) / 200 : freshness / 100;
+  const scoreColor = hasNps
+    ? (npsInsight.score >= 50 ? '#22c55e' : npsInsight.score >= 20 ? '#84cc16' : npsInsight.score >= 0 ? '#eab308' : '#ef4444')
+    : freshnessColor;
+  const scoreVerdict = hasNps
+    ? (npsInsight.score >= 50 ? 'Framúrskarandi' : npsInsight.score >= 30 ? 'Frábært' : npsInsight.score >= 20 ? 'Mjög gott' : npsInsight.score >= 0 ? 'Gott' : npsInsight.score >= -20 ? 'Viðunandi' : 'Þarfnast úrbóta')
+    : (freshness >= 95 ? 'Framúrskarandi' : freshness >= 85 ? 'Frábært' : freshness >= 70 ? 'Gott' : freshness >= 50 ? 'Viðunandi' : 'Þarfnast úrbóta');
+
   const arcPath = (startDeg, endDeg, radius) => {
     const s = (startDeg * Math.PI) / 180, e = (endDeg * Math.PI) / 180;
     const x1 = cx + radius * Math.cos(Math.PI + s), y1 = cy - radius * Math.sin(Math.PI + s);
@@ -51,9 +64,17 @@ function HeroBanner({ history, tables, source }) {
     return `M ${x1} ${y1} A ${radius} ${radius} 0 ${endDeg - startDeg > 180 ? 1 : 0} 1 ${x2} ${y2}`;
   };
 
-  const scoreColor = freshness >= 90 ? '#22c55e' : freshness >= 70 ? '#84cc16' : freshness >= 50 ? '#eab308' : '#ef4444';
-  const scoreVerdict = freshness >= 95 ? 'Framúrskarandi' : freshness >= 85 ? 'Frábært' : freshness >= 70 ? 'Gott' : freshness >= 50 ? 'Viðunandi' : 'Þarfnast úrbóta';
+  // NPS segment bar
+  const npsTotal = hasNps ? npsInsight.total : 0;
+  const pPct = npsTotal ? Math.round((npsInsight.promoters / npsTotal) * 100) : 0;
+  const paPct = npsTotal ? Math.round((npsInsight.passives / npsTotal) * 100) : 0;
+  const dPct = npsTotal ? Math.round((npsInsight.detractors / npsTotal) * 100) : 0;
 
+  // Rating
+  const avgAll = ratingInsight?.avg || 0;
+  const ratingColor = avgAll >= 4.5 ? '#22c55e' : avgAll >= 4 ? '#84cc16' : avgAll >= 3.5 ? '#eab308' : '#ef4444';
+
+  // Table segments (for non-NPS fallback)
   const sorted = [...tables].sort((a, b) => b.rows - a.rows);
   const top5 = sorted.slice(0, 5);
   const otherRows = sorted.slice(5).reduce((s, t) => s + t.rows, 0);
@@ -67,6 +88,8 @@ function HeroBanner({ history, tables, source }) {
     return () => clearTimeout(t);
   }, []);
 
+  const heroCount = hasNps ? npsInsight.total : totalRows;
+
   useEffect(() => {
     if (!animated) return;
     const duration = 1500;
@@ -76,14 +99,21 @@ function HeroBanner({ history, tables, source }) {
       const start = performance.now();
       const step = (now) => {
         const t = Math.min((now - start) / duration, 1);
-        el.textContent = format(Math.round(easeOut(t) * target));
+        const val = Math.round(easeOut(t) * Math.abs(target));
+        el.textContent = format(val);
         if (t < 1) requestAnimationFrame(step);
       };
       requestAnimationFrame(step);
     };
-    animateValue(countRef.current, totalRows, v => v.toLocaleString('is-IS'));
-    animateValue(rateRef.current, Math.round(freshness), v => `${v}%`);
-  }, [animated, totalRows, freshness]);
+    animateValue(countRef.current, heroCount, v => v.toLocaleString('is-IS'));
+    if (hasNps) {
+      animateValue(scoreRef.current, npsInsight.score, v =>
+        `${npsInsight.score > 0 ? '+' : npsInsight.score < 0 ? '\u2212' : ''}${v}`
+      );
+    } else {
+      animateValue(scoreRef.current, Math.round(freshness), v => `${v}%`);
+    }
+  }, [animated, heroCount, freshness, hasNps, npsInsight?.score]);
 
   return (
     <>
@@ -97,19 +127,19 @@ function HeroBanner({ history, tables, source }) {
           <div className="absolute top-[-80px] left-[-60px] w-[400px] h-[400px] rounded-full opacity-[0.18] blur-[120px]" style={{ background: scoreColor }} />
           <div className="absolute bottom-[-100px] right-[-80px] w-[350px] h-[350px] rounded-full opacity-[0.08] blur-[120px] bg-blue-500" />
 
-          <div className="relative z-10 flex flex-col lg:flex-row items-center justify-center gap-8">
-            {/* Left: Raðir */}
+          <div className="relative z-10 flex flex-col lg:flex-row items-center gap-6 lg:gap-12">
+            {/* Left stat card */}
             <div className="flex-shrink-0 min-w-[160px]">
               <div className="rounded-xl bg-white/[0.04] backdrop-blur-sm border border-white/[0.08] p-5 space-y-4">
                 <div>
                   <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500 font-medium flex items-center gap-2">
-                    Raðir
+                    {hasNps ? 'Svör' : 'Raðir'}
                     <span className="w-1.5 h-1.5 rounded-full bg-green-500 inline-block" style={{ animation: 'hero-dot 2s ease-in-out infinite' }} />
                   </div>
                   <div className="text-4xl font-extrabold text-white mt-1 tabular-nums" ref={countRef}>
-                    {totalRows.toLocaleString('is-IS')}
+                    {heroCount.toLocaleString('is-IS')}
                   </div>
-                  <div className="text-[11px] text-gray-500">heildarraðir</div>
+                  <div className="text-[11px] text-gray-500">{hasNps ? 'NPS svör' : 'heildarraðir'}</div>
                 </div>
                 {history.length > 1 && (
                   <div className="border-t border-white/[0.06] pt-3">
@@ -123,8 +153,8 @@ function HeroBanner({ history, tables, source }) {
               </div>
             </div>
 
-            {/* Center: Gauge */}
-            <div className="flex flex-col items-center">
+            {/* Center: NPS gauge (or freshness fallback) */}
+            <div className="flex-shrink-0 flex flex-col items-center">
               <svg viewBox="0 0 280 170" className="w-[300px] lg:w-[360px]">
                 <defs>
                   <filter id="heroGlow2"><feGaussianBlur stdDeviation="8" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
@@ -148,12 +178,24 @@ function HeroBanner({ history, tables, source }) {
                   <polygon points={`${cx},${cy - 3.5} ${cx - 78},${cy} ${cx},${cy + 3.5}`} fill="white" opacity="0.9" />
                 </g>
                 <circle cx={cx} cy={cy} r="7" fill="#111827" stroke="white" strokeWidth="2.5" />
-                <text ref={rateRef} x={cx} y={cy - 28} textAnchor="middle" fill={scoreColor} fontSize="44" fontWeight="800"
-                  filter="url(#heroGlow2)">{Math.round(freshness)}%</text>
-                <text x={cx} y={cy - 8} textAnchor="middle" fill="#6b7280" fontSize="11" fontWeight="500">ferskleiki</text>
-                <text x="28" y="148" fill="#4b5563" fontSize="9">0%</text>
-                <text x={cx} y="10" textAnchor="middle" fill="#4b5563" fontSize="9">50%</text>
-                <text x="250" y="148" fill="#4b5563" fontSize="9">100%</text>
+                <text ref={scoreRef} x={cx} y={cy - 28} textAnchor="middle" fill={scoreColor} fontSize="44" fontWeight="800"
+                  filter="url(#heroGlow2)">{hasNps ? (npsInsight.score > 0 ? '+' : '') + npsInsight.score : Math.round(freshness) + '%'}</text>
+                <text x={cx} y={cy - 8} textAnchor="middle" fill="#6b7280" fontSize="11" fontWeight="500">
+                  {hasNps ? 'NPS stig' : 'ferskleiki'}
+                </text>
+                {hasNps ? (
+                  <>
+                    <text x="20" y="148" fill="#4b5563" fontSize="9">{'\u2212'}100</text>
+                    <text x={cx} y="10" textAnchor="middle" fill="#4b5563" fontSize="9">0</text>
+                    <text x="256" y="148" fill="#4b5563" fontSize="9">+100</text>
+                  </>
+                ) : (
+                  <>
+                    <text x="28" y="148" fill="#4b5563" fontSize="9">0%</text>
+                    <text x={cx} y="10" textAnchor="middle" fill="#4b5563" fontSize="9">50%</text>
+                    <text x="250" y="148" fill="#4b5563" fontSize="9">100%</text>
+                  </>
+                )}
               </svg>
               <div className="-mt-1" style={{ opacity: animated ? 1 : 0, transform: animated ? 'translateY(0)' : 'translateY(8px)',
                 transition: 'all 0.6s ease 1.8s' }}>
@@ -164,24 +206,62 @@ function HeroBanner({ history, tables, source }) {
               </div>
             </div>
 
-            {/* Right: Töflur */}
+            {/* Right stat card */}
             <div className="flex-shrink-0 min-w-[160px]">
               <div className="rounded-xl bg-white/[0.04] backdrop-blur-sm border border-white/[0.08] p-5 space-y-4">
-                <div>
-                  <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500 font-medium">Töflur</div>
-                  <div className="text-4xl font-extrabold text-white mt-1 tabular-nums">{tables.length}</div>
-                  <div className="text-[11px] text-gray-500">í uppsprettu</div>
-                </div>
+                {ratingInsight ? (
+                  <div>
+                    <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500 font-medium">Heildareinkunn</div>
+                    <div className="text-4xl font-extrabold mt-1" style={{ color: ratingColor }}>
+                      {avgAll.toFixed(1)}<span className="text-lg text-gray-500">/5</span>
+                    </div>
+                    <div className="text-[11px] text-gray-500">meðaleinkunn</div>
+                  </div>
+                ) : (
+                  <div>
+                    <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500 font-medium">Töflur</div>
+                    <div className="text-4xl font-extrabold text-white mt-1 tabular-nums">{tables.length}</div>
+                    <div className="text-[11px] text-gray-500">í uppsprettu</div>
+                  </div>
+                )}
                 <div className="border-t border-white/[0.06] pt-3">
-                  <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500 font-medium">Nýjustu gögn</div>
-                  <div className="text-lg font-bold text-blue-400 mt-1">{timeAgo(lastSuccess?.started_at)}</div>
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500 font-medium">
+                    {hasNps ? 'Ferskleiki' : 'Nýjustu gögn'}
+                  </div>
+                  {hasNps ? (
+                    <div className="flex items-center gap-2 mt-1">
+                      <div className="text-lg font-bold tabular-nums" style={{ color: freshnessColor }}>{Math.round(freshness)}%</div>
+                      <div className="text-[11px] text-gray-500">{timeAgo(lastSuccess?.started_at)}</div>
+                    </div>
+                  ) : (
+                    <div className="text-lg font-bold text-blue-400 mt-1">{timeAgo(lastSuccess?.started_at)}</div>
+                  )}
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Segment bar */}
-          {segments.length > 0 && (
+          {/* NPS segment bar (when NPS available) or table segment bar */}
+          {hasNps ? (
+            <div className="relative z-10 mt-8">
+              <div className="flex h-3.5 rounded-full overflow-hidden bg-gray-800/80">
+                <div className="bg-green-500 transition-all duration-[1800ms] ease-out" style={{ width: animated ? `${pPct}%` : '0%' }} />
+                <div className="bg-yellow-500 transition-all duration-[1800ms] ease-out" style={{ width: animated ? `${paPct}%` : '0%' }} />
+                <div className="bg-red-500 transition-all duration-[1800ms] ease-out" style={{ width: animated ? `${dPct}%` : '0%' }} />
+              </div>
+              <div className="flex items-center justify-between mt-2.5 text-xs text-gray-400">
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-green-500 inline-block" /> Stuðningsmenn {pPct}%
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-yellow-500 inline-block" /> Hlutlausir {paPct}%
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block" /> Gagnrýnendur {dPct}%
+                </span>
+              </div>
+            </div>
+          ) : segments.length > 0 && (
             <div className="relative z-10 mt-8">
               <div className="flex h-3.5 rounded-full overflow-hidden bg-gray-800/80">
                 {segments.map((seg, i) => (
@@ -201,8 +281,8 @@ function HeroBanner({ history, tables, source }) {
             </div>
           )}
 
-          {/* Top 3 mini cards */}
-          {topTables.length > 0 && (
+          {/* Top 3 mini cards (only for non-NPS sources) */}
+          {!hasNps && topTables.length > 0 && (
             <div className="relative z-10 mt-5 grid grid-cols-1 sm:grid-cols-3 gap-3">
               {topTables.map((t, i) => {
                 const pct = (t.rows / maxTableRows) * 100;
@@ -309,6 +389,58 @@ function ColumnChart({ chart }) {
   return null;
 }
 
+function RatingInsightCard({ insight }) {
+  const { avg, count, scale, perQuestion } = insight;
+  const pct = (avg / scale) * 100;
+  const color = pct >= 80 ? '#22c55e' : pct >= 60 ? '#84cc16' : pct >= 40 ? '#eab308' : '#ef4444';
+
+  return (
+    <div className="bg-gray-800/60 rounded-xl p-6 border border-gray-700/50">
+      <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500 font-medium mb-4">Einkunn</div>
+      <div className="flex items-start gap-8">
+        <div className="text-center flex-shrink-0">
+          <div className="text-5xl font-black tabular-nums" style={{ color }}>{avg.toFixed(2)}</div>
+          <div className="text-lg text-gray-500 font-medium">/ {scale}</div>
+          <div className="text-xs text-gray-500 mt-1">{count.toLocaleString('is-IS')} svör</div>
+        </div>
+        {perQuestion.length > 0 && (
+          <div className="flex-1 space-y-2.5 min-w-0">
+            {perQuestion.map((q, i) => {
+              const qPct = (q.avg / scale) * 100;
+              const qColor = qPct >= 80 ? 'bg-green-500' : qPct >= 60 ? 'bg-green-400' : qPct >= 40 ? 'bg-yellow-400' : 'bg-red-400';
+              return (
+                <div key={i}>
+                  <div className="flex items-center justify-between mb-0.5">
+                    <span className="text-[11px] text-gray-400 truncate max-w-[80%]" title={q.heading}>{q.heading}</span>
+                    <span className="text-[11px] font-bold text-white ml-2 flex-shrink-0">{q.avg.toFixed(2)}</span>
+                  </div>
+                  <div className="h-1.5 bg-gray-700/50 rounded-full overflow-hidden">
+                    <div className={`h-full ${qColor} rounded-full transition-all duration-1000`} style={{ width: `${qPct}%` }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function InsightCards({ insights }) {
+  // NPS is shown in HeroBanner — only render non-NPS insights here
+  const filtered = (insights || []).filter(i => i.type !== 'nps');
+  if (filtered.length === 0) return null;
+  return (
+    <div className="space-y-4">
+      {filtered.map((ins, i) => {
+        if (ins.type === 'rating') return <RatingInsightCard key={i} insight={ins} />;
+        return null;
+      })}
+    </div>
+  );
+}
+
 function TableCard({ name, rows, columns }) {
   const [open, setOpen] = useState(false);
   const charted = columns.filter(c => c.chart);
@@ -356,12 +488,14 @@ function TableCard({ name, rows, columns }) {
 }
 
 export default function SourceDashboardPage({ sourceName, onBack }) {
-  const { data, loading } = useFetch(`/sources/${sourceName}/dashboard`);
+  const [selectedSurvey, setSelectedSurvey] = useState(null);
+  const surveyParam = selectedSurvey ? `?survey=${selectedSurvey}` : '';
+  const { data, loading } = useFetch(`/sources/${sourceName}/dashboard${surveyParam}`);
 
   if (loading) return <div className="text-gray-500 text-sm p-6">Hleð mælaborði...</div>;
   if (!data) return <div className="text-red-400 text-sm p-6">Gat ekki hlaðið mælaborði</div>;
 
-  const { source, history, tables, tableDetails } = data;
+  const { source, history, tables, tableDetails, insights, surveys } = data;
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -373,7 +507,41 @@ export default function SourceDashboardPage({ sourceName, onBack }) {
         <span className="text-xs px-2 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/20">{source.type}</span>
       </div>
 
-      <HeroBanner history={history} tables={tables} source={source} />
+      {/* Survey picker */}
+      {surveys && surveys.length > 0 && (
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-gray-500 uppercase tracking-wider font-medium">Könnun</span>
+          <div className="flex gap-1.5 flex-wrap">
+            <button
+              onClick={() => setSelectedSurvey(null)}
+              className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${
+                !selectedSurvey
+                  ? 'bg-blue-500/20 text-blue-300 border-blue-500/40'
+                  : 'bg-gray-800/60 text-gray-400 border-gray-700/50 hover:bg-gray-700/50 hover:text-gray-300'
+              }`}
+            >
+              Allar kannanir
+            </button>
+            {surveys.map(s => (
+              <button
+                key={s.id}
+                onClick={() => setSelectedSurvey(s.id)}
+                className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${
+                  selectedSurvey === s.id
+                    ? 'bg-blue-500/20 text-blue-300 border-blue-500/40'
+                    : 'bg-gray-800/60 text-gray-400 border-gray-700/50 hover:bg-gray-700/50 hover:text-gray-300'
+                }`}
+              >
+                {s.title}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <HeroBanner history={history} tables={tables} source={source} insights={insights} />
+
+      <InsightCards insights={insights} />
 
       {/* Run history chart */}
       {history.length > 1 && (

@@ -532,6 +532,89 @@ app.get('/api/overview', async (req, res) => {
   }
 });
 
+// ── Auto-insight detection ──
+async function detectNps(schema, tableDetails, surveyId) {
+  // Find a table/column that looks like NPS scores (0-10)
+  for (const [table, columns] of Object.entries(tableDetails)) {
+    if (!/nps|promoter|net.?promoter/i.test(table)) continue;
+    for (const col of columns) {
+      if (!col.chart || col.chart.type !== 'histogram') continue;
+      const { min, max } = col.chart.stats;
+      if (min < 0 || max > 10 || max < 9) continue;
+      // Run NPS aggregation (optionally filtered by survey)
+      const hasSurveyCol = columns.some(c => c.name === 'survey_id');
+      const filterSurvey = surveyId && hasSurveyCol;
+      const res = await db.pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE "${col.name}" >= 9) as promoters,
+          COUNT(*) FILTER (WHERE "${col.name}" >= 7 AND "${col.name}" <= 8) as passives,
+          COUNT(*) FILTER (WHERE "${col.name}" <= 6) as detractors,
+          COUNT(*) as total
+        FROM "${schema}"."${table}"
+        WHERE "${col.name}" IS NOT NULL${filterSurvey ? ' AND "survey_id" = $1' : ''}
+      `, filterSurvey ? [surveyId] : []);
+      const r = res.rows[0];
+      const total = parseInt(r.total);
+      if (total === 0) continue;
+      const promoters = parseInt(r.promoters);
+      const passives = parseInt(r.passives);
+      const detractors = parseInt(r.detractors);
+      const score = Math.round(((promoters - detractors) / total) * 100);
+      return { type: 'nps', score, total, promoters, passives, detractors, table, column: col.name };
+    }
+  }
+  return null;
+}
+
+async function detectRating(schema, tableDetails, surveyId) {
+  // Find a table/column that looks like ratings (1-5)
+  for (const [table, columns] of Object.entries(tableDetails)) {
+    if (!/rating|score|einkunn/i.test(table)) continue;
+    for (const col of columns) {
+      if (!col.chart || col.chart.type !== 'histogram') continue;
+      const { min, max } = col.chart.stats;
+      if (min < 1 || max > 5 || max < 4) continue;
+      // Overall average (optionally filtered by survey)
+      const hasSurveyCol = columns.some(c => c.name === 'survey_id');
+      const filterSurvey = surveyId && hasSurveyCol;
+      const avgRes = await db.pool.query(`
+        SELECT AVG("${col.name}")::float as avg, COUNT(*) as count
+        FROM "${schema}"."${table}"
+        WHERE "${col.name}" IS NOT NULL${filterSurvey ? ' AND "survey_id" = $1' : ''}
+      `, filterSurvey ? [surveyId] : []);
+      const result = { type: 'rating', avg: avgRes.rows[0].avg, count: parseInt(avgRes.rows[0].count), scale: 5, table, column: col.name, perQuestion: [] };
+      // Check if table has question_id and schema has a question table with heading
+      const hasQid = columns.some(c => /question.?id/i.test(c.name));
+      const qTable = Object.keys(tableDetails).find(t => /^question$/i.test(t));
+      if (hasQid && qTable) {
+        const qidCol = columns.find(c => /question.?id/i.test(c.name)).name;
+        const qCols = tableDetails[qTable];
+        const headingCol = qCols.find(c => /heading|title|text/i.test(c.name));
+        if (headingCol) {
+          const pqRes = await db.pool.query(`
+            SELECT q."${headingCol.name}" as heading, AVG(r."${col.name}")::float as avg, COUNT(*) as count
+            FROM "${schema}"."${table}" r
+            JOIN "${schema}"."${qTable}" q ON q."${qidCol}" = r."${qidCol}"
+            WHERE r."${col.name}" IS NOT NULL${filterSurvey ? ' AND r."survey_id" = $1' : ''}
+            GROUP BY q."${headingCol.name}"
+            ORDER BY avg DESC
+          `, filterSurvey ? [surveyId] : []);
+          result.perQuestion = pqRes.rows.map(r => ({ heading: r.heading, avg: r.avg, count: parseInt(r.count) }));
+        }
+      }
+      return result;
+    }
+  }
+  return null;
+}
+
+async function analyzeInsights(schema, tableDetails, surveyId) {
+  const insights = [];
+  try { const nps = await detectNps(schema, tableDetails, surveyId); if (nps) insights.push(nps); } catch (e) { console.error('[Insights] NPS detection failed:', e.message); }
+  try { const rating = await detectRating(schema, tableDetails, surveyId); if (rating) insights.push(rating); } catch (e) { console.error('[Insights] Rating detection failed:', e.message); }
+  return insights;
+}
+
 // ── API: Source dashboard ──
 app.get('/api/sources/:name/dashboard', async (req, res) => {
   const { name } = req.params;
@@ -661,12 +744,33 @@ app.get('/api/sources/:name/dashboard', async (req, res) => {
       tableDetails[t.table] = columns;
     }
 
+    // Discover surveys: check if schema has a "survey" table with survey_id + title columns
+    let surveys = null;
+    const surveyTable = tablesRes.rows.find(t => t.table_name === 'survey');
+    if (surveyTable) {
+      const surveyColsRes = await db.pool.query(`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = 'survey'
+      `, [name]);
+      const surveyColNames = surveyColsRes.rows.map(c => c.column_name);
+      if (surveyColNames.includes('survey_id') && surveyColNames.includes('title')) {
+        const surveyRows = await db.pool.query(`SELECT DISTINCT survey_id, title FROM "${name}".survey ORDER BY title`);
+        surveys = surveyRows.rows.map(r => ({ id: r.survey_id, title: r.title }));
+      }
+    }
+
+    // Auto-detect business insights (optionally filtered by survey)
+    const surveyId = req.query.survey || null;
+    const insights = await analyzeInsights(name, tableDetails, surveyId);
+
     res.json({
       data: {
         source: { name: source.name, type: source.source_type, schedule: source.schedule, lastRun: source.last_run, lastStatus: source.last_status, lastRows: source.last_rows },
         history: historyRes.rows.reverse(),
         tables,
         tableDetails,
+        insights,
+        ...(surveys && { surveys }),
       },
     });
   } catch (err) {
