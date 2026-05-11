@@ -84,7 +84,7 @@ async function extractResponses(surveyId) {
 
   // Fetch all responses (paginated, bulk endpoint)
   const responses = [];
-  let url = `/surveys/${surveyId}/responses/bulk?per_page=100&status=completed`;
+  let url = `/surveys/${surveyId}/responses/bulk?per_page=100`;
   while (url) {
     const resp = await client.get(url);
     responses.push(...(resp.data.data || []));

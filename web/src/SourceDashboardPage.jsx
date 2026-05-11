@@ -490,15 +490,26 @@ function TableCard({ name, rows, columns }) {
   );
 }
 
+function useDebounced(value, ms = 600) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return debounced;
+}
+
 export default function SourceDashboardPage({ sourceName, onBack }) {
   const [selectedSurvey, setSelectedSurvey] = useState(null);
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
+  const debouncedFrom = useDebounced(dateFrom);
+  const debouncedTo = useDebounced(dateTo);
 
   const params = new URLSearchParams();
   if (selectedSurvey) params.set('survey', selectedSurvey);
-  if (dateFrom) params.set('dateFrom', dateFrom);
-  if (dateTo) params.set('dateTo', dateTo);
+  if (debouncedFrom) params.set('dateFrom', debouncedFrom);
+  if (debouncedTo) params.set('dateTo', debouncedTo);
   const qs = params.toString() ? `?${params.toString()}` : '';
   const { data, loading } = useFetch(`/sources/${sourceName}/dashboard${qs}`);
 
@@ -586,9 +597,9 @@ export default function SourceDashboardPage({ sourceName, onBack }) {
               {npsInsight && npsInsight.total !== responseStats.total && (
                 <span>{npsInsight.total.toLocaleString('is-IS')} NPS svör</span>
               )}
-              {responseStats.earliest && (
+              {responseStats.earliest && new Date(responseStats.earliest).getFullYear() > 2000 && (
                 <span title={`${new Date(responseStats.earliest).toLocaleDateString('is-IS')} – ${new Date(responseStats.latest).toLocaleDateString('is-IS')}`}>
-                  {new Date(responseStats.earliest).toLocaleDateString('is-IS', { month: 'short', year: 'numeric' })} – {new Date(responseStats.latest).toLocaleDateString('is-IS', { month: 'short', year: 'numeric' })}
+                  {new Date(responseStats.earliest).toLocaleDateString('is-IS', { day: 'numeric', month: 'short', year: 'numeric' })} – {new Date(responseStats.latest).toLocaleDateString('is-IS', { day: 'numeric', month: 'short', year: 'numeric' })}
                 </span>
               )}
             </div>

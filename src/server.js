@@ -792,7 +792,7 @@ app.get('/api/sources/:name/dashboard', async (req, res) => {
         const sParams = surveyId ? [surveyId] : [];
         const statsRes = await db.pool.query(`
           SELECT COUNT(*) as total,
-                 MIN(created_at) as earliest,
+                 MIN(created_at) FILTER (WHERE created_at > '2000-01-01') as earliest,
                  MAX(created_at) as latest
           FROM "${name}".response
           WHERE 1=1${surveyFilter}
