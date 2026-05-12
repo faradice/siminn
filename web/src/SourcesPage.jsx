@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useFetch, API } from './shared';
-import { Clock, Calendar, ChevronDown, ChevronUp, ChevronRight, Search, Pencil, Plus, KeyRound } from 'lucide-react';
+import { Clock, Calendar, ChevronDown, ChevronUp, ChevronRight, Search, Pencil, Plus, KeyRound, X } from 'lucide-react';
 
 const SCHEDULE_PRESETS = [
   { label: 'Á hverri klukkustund', value: '0 * * * *' },
@@ -18,7 +18,7 @@ export default function SourcesPage({ onNavigate }) {
   const [expanded, setExpanded] = useState(null); // source name with open probe panel
   const [probeState, setProbeState] = useState({ url: '', urls: [], result: null, probing: false, importing: false, schema: '', table: '' });
   const [showNew, setShowNew] = useState(false);
-  const [newSource, setNewSource] = useState({ name: '', url: '', showOAuth: false, oauth2: { tokenUrl: '', clientId: '', clientSecret: '', username: '', password: '' } });
+  const [newSource, setNewSource] = useState({ name: '', urls: [''], showOAuth: false, showHeaders: false, headers: [{ key: '', value: '' }], oauth2: { tokenUrl: '', clientId: '', clientSecret: '', username: '', password: '' } });
   const [savingNew, setSavingNew] = useState(false);
 
   const runSource = async (name) => {
@@ -109,16 +109,19 @@ export default function SourcesPage({ onNavigate }) {
 
   const saveNewSource = async () => {
     const name = newSource.name.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
-    if (!name || !newSource.url.trim()) return;
+    const urls = newSource.urls.map(u => u.trim()).filter(Boolean);
+    if (!name || !urls.length) return;
     setSavingNew(true);
     try {
-      const secret = { name, urls: [newSource.url.trim()] };
+      const secret = { name, urls };
       if (newSource.oauth2.tokenUrl.trim()) secret.oauth2 = newSource.oauth2;
+      const hdrs = newSource.headers.filter(h => h.key.trim() && h.value.trim());
+      if (hdrs.length) secret.headers = Object.fromEntries(hdrs.map(h => [h.key.trim(), h.value.trim()]));
       await fetch(`${API}/secrets/${name}`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(secret),
       });
-      setNewSource({ name: '', url: '', showOAuth: false, oauth2: { tokenUrl: '', clientId: '', clientSecret: '', username: '', password: '' } });
+      setNewSource({ name: '', urls: [''], showOAuth: false, showHeaders: false, headers: [{ key: '', value: '' }], oauth2: { tokenUrl: '', clientId: '', clientSecret: '', username: '', password: '' } });
       setShowNew(false);
       refetch();
     } catch {}
@@ -306,12 +309,55 @@ export default function SourcesPage({ onNavigate }) {
         </button>
         {showNew && (
           <div className="px-6 pb-6 space-y-3">
-            <div className="grid grid-cols-2 gap-2">
-              <input value={newSource.name} onChange={e => setNewSource(s => ({ ...s, name: e.target.value }))}
-                placeholder="Heiti (t.d. creditinfo)" className={inputCls} />
-              <input value={newSource.url} onChange={e => setNewSource(s => ({ ...s, url: e.target.value }))}
-                placeholder="https://api.example.com/data" className={inputCls} />
+            <input value={newSource.name} onChange={e => setNewSource(s => ({ ...s, name: e.target.value }))}
+              placeholder="Heiti (t.d. getfeedback)" className={inputCls + ' w-full'} />
+
+            {/* Multi-URL inputs */}
+            <div className="space-y-2">
+              <div className="text-xs text-gray-500">URL-ar</div>
+              {newSource.urls.map((url, i) => (
+                <div key={i} className="flex gap-2">
+                  <input value={url} onChange={e => setNewSource(s => {
+                    const urls = [...s.urls]; urls[i] = e.target.value; return { ...s, urls };
+                  })} placeholder="https://api.example.com/data" className={inputCls + ' flex-1'} />
+                  {newSource.urls.length > 1 && (
+                    <button onClick={() => setNewSource(s => ({ ...s, urls: s.urls.filter((_, j) => j !== i) }))}
+                      className="p-2 text-gray-500 hover:text-red-400 transition-colors"><X className="w-4 h-4" /></button>
+                  )}
+                </div>
+              ))}
+              <button onClick={() => setNewSource(s => ({ ...s, urls: [...s.urls, ''] }))}
+                className="text-xs text-blue-400 hover:text-blue-300 transition-colors">+ Bæta við URL</button>
             </div>
+
+            {/* Headers toggle */}
+            <button onClick={() => setNewSource(s => ({ ...s, showHeaders: !s.showHeaders }))}
+              className="flex items-center gap-2 text-xs text-gray-400 hover:text-gray-200 transition-colors">
+              {newSource.showHeaders ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+              Hausar
+            </button>
+            {newSource.showHeaders && (
+              <div className="space-y-2 p-3 bg-gray-900/40 rounded-lg border border-gray-700/30">
+                {newSource.headers.map((h, i) => (
+                  <div key={i} className="flex gap-2">
+                    <input value={h.key} onChange={e => setNewSource(s => {
+                      const headers = [...s.headers]; headers[i] = { ...headers[i], key: e.target.value }; return { ...s, headers };
+                    })} placeholder="Authorization" className={inputCls + ' w-40'} />
+                    <input value={h.value} onChange={e => setNewSource(s => {
+                      const headers = [...s.headers]; headers[i] = { ...headers[i], value: e.target.value }; return { ...s, headers };
+                    })} placeholder="Bearer token..." className={inputCls + ' flex-1'} />
+                    {newSource.headers.length > 1 && (
+                      <button onClick={() => setNewSource(s => ({ ...s, headers: s.headers.filter((_, j) => j !== i) }))}
+                        className="p-2 text-gray-500 hover:text-red-400 transition-colors"><X className="w-4 h-4" /></button>
+                    )}
+                  </div>
+                ))}
+                <button onClick={() => setNewSource(s => ({ ...s, headers: [...s.headers, { key: '', value: '' }] }))}
+                  className="text-xs text-blue-400 hover:text-blue-300 transition-colors">+ Bæta við haus</button>
+              </div>
+            )}
+
+            {/* OAuth2 toggle */}
             <button onClick={() => setNewSource(s => ({ ...s, showOAuth: !s.showOAuth }))}
               className="flex items-center gap-2 text-xs text-gray-400 hover:text-gray-200 transition-colors">
               {newSource.showOAuth ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
@@ -331,7 +377,7 @@ export default function SourcesPage({ onNavigate }) {
                   placeholder="Password" type="password" className={inputCls} />
               </div>
             )}
-            <button onClick={saveNewSource} disabled={savingNew || !newSource.name.trim() || !newSource.url.trim()}
+            <button onClick={saveNewSource} disabled={savingNew || !newSource.name.trim() || !newSource.urls.some(u => u.trim())}
               className="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-500 transition-colors disabled:opacity-40">
               {savingNew ? 'Vista...' : 'Vista uppsprettu'}
             </button>

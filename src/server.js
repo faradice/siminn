@@ -64,6 +64,10 @@ function extractRows(data) {
     for (const key of ['data', 'results', 'items', 'records', 'rows', 'value']) {
       if (Array.isArray(data[key])) return data[key];
     }
+    // Fallback: use the first array-valued property
+    for (const val of Object.values(data)) {
+      if (Array.isArray(val)) return val;
+    }
   }
   return [data];
 }
@@ -87,12 +91,34 @@ async function runSecretSource(name) {
   const secret = JSON.parse(fs.readFileSync(secretFile, 'utf8'));
   const headers = await resolveHeaders(secret.headers || {}, secret.oauth2);
   const summary = {};
-  for (const url of (secret.urls || [])) {
-    const tableName = url.split('/').pop()?.replace(/[^a-z0-9_]/gi, '_').toLowerCase() || 'data';
-    const resp = await axios.get(url, { headers, timeout: 120000 });
-    const rows = extractRows(resp.data).map(flattenRow);
-    summary[tableName] = rows.length > 0 ? await fullLoad(name, tableName, rows) : 0;
-    console.log(`  [REST] ${name}.${tableName}: ${summary[tableName]} rows`);
+  for (const entry of (secret.urls || [])) {
+    const url = typeof entry === 'string' ? entry : entry.url;
+    let tableName;
+    if (typeof entry === 'object' && entry.table) {
+      tableName = entry.table;
+    } else {
+      const urlPath = new URL(url).pathname.replace(/\/+$/, '');
+      const segments = urlPath.split('/').filter(Boolean);
+      const rawName = segments.length >= 2 ? `${segments[segments.length - 2]}_${segments[segments.length - 1]}` : segments[segments.length - 1] || 'data';
+      tableName = rawName.replace(/[^a-z0-9_]/gi, '_').toLowerCase();
+    }
+    // Paginate: fetch all pages until empty
+    let allRows = [];
+    let page = 1;
+    while (true) {
+      const pageUrl = new URL(url);
+      pageUrl.searchParams.set('page', page);
+      const resp = await axios.get(pageUrl.toString(), { headers, timeout: 120000 });
+      const rows = extractRows(resp.data);
+      if (!rows.length) break;
+      allRows.push(...rows);
+      console.log(`  [REST] ${name}.${tableName} page ${page}: ${rows.length} rows`);
+      if (rows.length < parseInt(pageUrl.searchParams.get('per_page') || '100', 10)) break;
+      page++;
+    }
+    const flatRows = allRows.map(flattenRow);
+    summary[tableName] = flatRows.length > 0 ? await fullLoad(name, tableName, flatRows) : 0;
+    console.log(`  [REST] ${name}.${tableName}: ${summary[tableName]} total rows`);
   }
   return summary;
 }
